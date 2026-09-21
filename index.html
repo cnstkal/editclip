@@ -577,9 +577,7 @@ DETAIL.forEach(([f, tags, input]) => {
 });
 $("favBtn").onclick = async () => { if (!currentDetail) return; await toggleFavorite(currentDetail); renderDetail(); };
 $("deleteBtn").onclick = async () => {
-  const v = currentDetail; if (!v || !confirm(`"${v.filename}" 영상을 삭제할까요?\nFirebase 데이터가 삭제됩니다. (Cloudinary 원본은 API 키가 설정된 경우에만 삭제)`)) return;
-  let ok = false; try { ok = v.cloudinaryPublicId ? await destroyOld(v.cloudinaryPublicId) : true; } catch (_) {}
-  if (!ok && !confirm("Cloudinary 원본은 삭제되지 않습니다(API 키 없음 또는 오류). 목록에서만 삭제할까요?")) return;
+  const v = currentDetail; if (!v || !confirm(`"${v.filename}" 영상을 목록에서 삭제할까요?\n(앱/Firebase 목록에서만 삭제되며 Cloudinary 원본은 그대로 유지됩니다)`)) return;
   try {
     const ids = new Set([v.id, v.uploadJobId].filter(Boolean));
     await deleteDoc(doc(db, "videos", v.id));
@@ -612,7 +610,8 @@ $("downloadBtn").onclick = async () => {
 // ---------- 업로드 ----------
 // 구조: Firestore `uploadJobs` 컬렉션에 파일별 작업 상태를 저장(pending/uploading/completed/failed/paused).
 // 실행 중인 JS는 페이지가 닫히면 종료된다. 백그라운드 업로드는 하지 않고, 앱을 다시 열면 남은 작업을 이어받는다.
-const CONCURRENCY = 4;              // 동시 업로드 최대 개수 (3~5)
+const CONCURRENCY = 10;             // 동시 업로드 최대 개수
+const HASH_PARALLEL = 2;            // 해시 계산(파일을 메모리에 읽음) 동시 개수 제한 — 동시 10개여도 메모리 급증 방지
 const MAX_ROWS = 300;               // 목록에 그리는 최대 행 수 (성능)
 const FULL_HASH_LIMIT = 50 * 1024 * 1024; // 이 크기 이하는 전체 SHA-256, 초과는 표본 해시
 const UPLOAD_TIMEOUT_MS = 30 * 60 * 1000;
@@ -658,6 +657,12 @@ function cyrb53(str) {
 async function jobIdFor(file, relPath) {
   const key = `${relPath}|${file.name}|${file.size}|${file.lastModified}`;
   return "j" + (window.crypto && crypto.subtle ? await sha1Hex(key) : cyrb53(key));
+}
+let hashActive = 0; const hashQ = [];
+async function computeFileHashGated(file) {
+  if (hashActive >= HASH_PARALLEL) await new Promise(r => hashQ.push(r)); else hashActive++;
+  try { return await computeFileHash(file); }
+  finally { const n = hashQ.shift(); if (n) n(); else hashActive--; } // 대기자가 있으면 슬롯을 그대로 넘김
 }
 // 내용 해시: 50MB 이하 = 전체 SHA-256(기존 fileHash와 동일 형식), 초과 = 크기+8곳 1MB 표본 해시("s:" 접두)
 async function computeFileHash(file) {
@@ -762,6 +767,8 @@ async function addFiles(entries) {
     queueItems.push(it); itemById.set(jobId, it);
   }
   renderFileList();
+  const skippedDone = vids.length - fresh - attached;
+  if (skippedDone > 0) toast(`${skippedDone}개는 이미 목록에 있는 동일 파일(경로·이름·크기·수정시간 동일)이라 이어받기 기록을 유지했습니다`);
   if (toCreate.length) {
     for (let i = 0; i < toCreate.length; i += 400) {
       const chunk = toCreate.slice(i, i + 400);
@@ -1020,25 +1027,15 @@ function scheduleGridRender() { if (gridTimer) return; gridTimer = setTimeout(()
 
 async function processItem(item) {
   try {
-    item.hash = item.hash || await computeFileHash(item.file);
-    if (!item.hash && !processItem.warned) { processItem.warned = true; diag("이 환경은 crypto.subtle(HTTPS 필요)이 없어 해시 중복 검사를 건너뜁니다", true); }
-    let existing = null, waitFor = null, p = null;
-    if (item.hash) {
-      existing = hashIndex.get(item.hash);
-      if (existing && existing.jobId === item.jobId) existing = null;
-      if (!existing) waitFor = inflight.get(item.hash);
-    }
-    if (!existing && waitFor) { try { existing = await waitFor; } catch (_) { existing = null; } }
-    if (!existing) {
-      p = (item.action === "overwrite" ? overwriteAndSave : uploadAndSave)(item);                       // 검사~등록이 동기 구간이라 같은 hash 동시 업로드 방지
-      if (item.hash) inflight.set(item.hash, p);
-      try { await p; } finally { if (item.hash && inflight.get(item.hash) === p) inflight.delete(item.hash); }
-      item.duplicate = false;
-    } else {
-      item.duplicate = true; item.dupKind = "hash"; item.publicId = existing.publicId; item.url = existing.url; item.thumb = existing.thumb;
-      diag(`이미 등록됨(해시 일치), 업로드 생략: ${item.name}`);
-    }
-    item.status = item.duplicate ? "duplicate" : "completed"; item.error = null;
+    // 중복(파일명/내용) 여부와 관계없이 항상 업로드. hash는 fileHash 기록용으로만 계산한다.
+    item.hash = item.hash || await computeFileHashGated(item.file);
+    if (!item.hash && !processItem.warned) { processItem.warned = true; diag("이 환경은 crypto.subtle(HTTPS 필요)이 없어 fileHash를 기록하지 못합니다", true); }
+    await (item.action === "overwrite" ? overwriteAndSave : uploadAndSave)(item);
+    item.duplicate = false; item.dupKind = null;
+    item.status = "completed"; item.error = null;
+    // 프리셋이 파일명을 public_id로 쓰는 경우 같은 이름끼리 Cloudinary에서 덮어써질 수 있어 경고
+    if (item.publicId && videos.some(v => v.id !== item.jobId && v.cloudinaryPublicId === item.publicId))
+      toast(`주의: 다른 영상과 Cloudinary public_id가 같습니다 (${item.name}). 업로드 프리셋의 unique filename 설정을 확인하세요.`);
   } catch (e) {
     item.status = "failed"; item.error = e.message || String(e);
     diag(`실패: ${item.name} — ${item.error}`, true);
@@ -1104,23 +1101,8 @@ function askDups(list) {
     ov.classList.add("show"); // 기본 선택값 없음: 사용자가 고를 때까지 action은 null
   });
 }
-// 등록된 영상과 filename이 같으면 사용자에게 묻는다. 내용(hash)까지 같으면 묻지 않고 hash 중복으로 처리된다.
-async function resolveDups() {
-  const byName = new Map(videos.map(v => [v.filename, v])), list = [];
-  for (const it of queueItems) {
-    if (it.status !== "pending" || !it.file || it.action) continue;
-    const old = byName.get(it.name);
-    if (!old || old.id === it.jobId) continue;
-    it.hash = it.hash || await computeFileHash(it.file);
-    if (it.hash && old.fileHash === it.hash) continue;
-    it.targetId = old.id; list.push({ it, old });
-  }
-  if (list.length && !(await askDups(list))) return false;
-  const sk = list.map(c => c.it).filter(i => i.action === "skip");
-  sk.forEach(i => { i.status = "duplicate"; i.duplicate = true; i.dupKind = "name"; i.error = null; });
-  if (sk.length) await persistMany(sk);   // 건너뛴 파일: 업로드 없이 중복 상태로 기록
-  return true;
-}
+// 파일명/내용이 같아도 묻거나 건너뛰지 않고 모두 업로드한다. (askDups·덮어쓰기 코드는 사용하지 않지만 남겨둠)
+async function resolveDups() { return true; }
 let askBusy = false;
 async function begin() {
   if (askBusy) return;

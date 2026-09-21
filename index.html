@@ -59,6 +59,12 @@
     border:2px solid #fff; background:rgba(0,0,0,.25);
   }
   .card .chk.on { background:#1a1a1a; }
+  .star {
+    position:absolute; top:6px; right:6px; border:none; background:rgba(0,0,0,.35); color:#fff;
+    width:26px; height:26px; border-radius:50%; font-size:15px; cursor:pointer; line-height:1;
+  }
+  .kwTag { display:inline-flex; align-items:center; gap:4px; background:#f0f0f0; border-radius:14px; padding:4px 10px; margin:3px; font-size:12px; }
+  .kwTag button { border:none; background:none; cursor:pointer; font-size:12px; color:#999; }
   .empty { text-align:center; color:#999; padding:60px 0; font-size:14px; }
 
   .overlay {
@@ -99,6 +105,7 @@
 <header>
   <div class="topbar">
     <input id="searchInput" placeholder="자연어로 검색 (예: 공항에서 캐리어 끌던 윤호)">
+    <button class="btn secondary" id="favFilterBtn">☆</button>
     <button class="btn secondary" id="selectModeBtn">선택</button>
     <button class="btn" id="uploadOpenBtn">＋ 업로드</button>
   </div>
@@ -120,7 +127,34 @@
     <button class="close" id="detailClose">✕</button>
     <img id="detailImg">
     <div id="detailFn"></div>
+    <button class="btn secondary" id="favBtn" style="width:100%;margin-bottom:8px;">☆ 즐겨찾기</button>
     <button class="btn" id="downloadBtn" style="width:100%;">원본 저장</button>
+
+    <div class="row" style="margin-top:16px;">
+      <div style="font-size:12px;color:#999;margin-bottom:4px;">검색어</div>
+      <div id="detailKwTags"></div>
+      <div style="display:flex;gap:6px;margin-top:6px;">
+        <input id="detailKwAdd" placeholder="검색어 추가" style="flex:1;padding:8px;border:1px solid #ddd;border-radius:8px;">
+        <button class="btn secondary" id="detailKwAddBtn">추가</button>
+      </div>
+    </div>
+    <div class="row">
+      <div style="font-size:12px;color:#999;margin-bottom:4px;">인물</div>
+      <div id="detailPeopleTags"></div>
+      <div style="display:flex;gap:6px;margin-top:6px;">
+        <input id="detailPeopleAdd" placeholder="인물 추가" style="flex:1;padding:8px;border:1px solid #ddd;border-radius:8px;">
+        <button class="btn secondary" id="detailPeopleAddBtn">추가</button>
+      </div>
+    </div>
+    <div class="row">
+      <div style="font-size:12px;color:#999;margin-bottom:4px;">조합</div>
+      <div id="detailPairsTags"></div>
+      <div style="display:flex;gap:6px;margin-top:6px;">
+        <input id="detailPairsAdd" placeholder="조합 추가 (예: A+B)" style="flex:1;padding:8px;border:1px solid #ddd;border-radius:8px;">
+        <button class="btn secondary" id="detailPairsAddBtn">추가</button>
+      </div>
+    </div>
+    <button class="btn secondary" id="deleteBtn" style="width:100%;margin-top:10px;color:#a31c2b;">영상 삭제</button>
   </div>
 </div>
 
@@ -150,9 +184,14 @@
 <div class="overlay" id="kwOverlay">
   <div class="sheet">
     <button class="close" id="kwClose">✕</button>
-    <h3>검색어 적용 (<span id="kwTargetCount">0</span>개 영상)</h3>
+    <h3>일괄 적용 (<span id="kwTargetCount">0</span>개 영상)</h3>
     <div class="row">
-      <textarea id="kwInput" placeholder="검색어 (쉼표 또는 줄바꿈)"></textarea>
+      <label><input type="radio" name="kwField" value="keywords" checked> 검색어</label>
+      <label><input type="radio" name="kwField" value="people"> 인물</label>
+      <label><input type="radio" name="kwField" value="pairs"> 조합</label>
+    </div>
+    <div class="row">
+      <textarea id="kwInput" placeholder="쉼표 또는 줄바꿈으로 입력 (조합 예: A+B)"></textarea>
     </div>
     <div class="row">
       <label><input type="radio" name="kwMode" value="add" checked> 기존에 추가</label>
@@ -187,18 +226,39 @@ const fbApp = initializeApp(firebaseConfig);
 const db = getFirestore(fbApp);
 
 const CLOUD_NAME = "qm0m5g4o";
-// Cloudinary Secret은 사용하지 않음 (unsigned upload preset 사용).
-let UPLOAD_PRESET = localStorage.getItem("cld_upload_preset");
-if (!UPLOAD_PRESET) {
-  UPLOAD_PRESET = prompt("Cloudinary Unsigned Upload Preset 이름을 입력하세요\n(Cloudinary 콘솔 > Settings > Upload > Unsigned preset 생성)");
-  if (UPLOAD_PRESET) localStorage.setItem("cld_upload_preset", UPLOAD_PRESET.trim());
+const UPLOAD_PRESET = "editclip"; // Unsigned preset (secret 미사용)
+
+// 삭제(Cloudinary destroy)는 서명이 필요해 API Key/Secret이 있어야 함.
+// 코드에 하드코딩하지 않고 최초 1회 입력받아 브라우저에만 저장한다.
+function getCldCreds() {
+  let key = localStorage.getItem("cld_api_key");
+  let secret = localStorage.getItem("cld_api_secret");
+  if (!key || !secret) {
+    key = prompt("(삭제 기능용) Cloudinary API Key를 입력하세요");
+    secret = prompt("(삭제 기능용) Cloudinary API Secret을 입력하세요");
+    if (key && secret) {
+      localStorage.setItem("cld_api_key", key.trim());
+      localStorage.setItem("cld_api_secret", secret.trim());
+    }
+  }
+  return { key, secret };
+}
+async function sha1Hex(str) {
+  const buf = await crypto.subtle.digest("SHA-1", new TextEncoder().encode(str));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+async function sha256Hex(buf) {
+  const h = await crypto.subtle.digest("SHA-256", buf);
+  return [...new Uint8Array(h)].map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
-let videos = [];      // {id, filename, cloudinaryUrl, thumbnailUrl, cloudinaryPublicId, keywords}
+let videos = [];      // {id, filename, cloudinaryUrl, thumbnailUrl, cloudinaryPublicId, keywords, people, pairs, favorite, fileHash}
 let filenameSet = new Set();
+let hashSet = new Set();
 let bundles = [];
 let selectMode = false;
 let selected = new Set();
+let favOnly = false;
 
 const $ = (id) => document.getElementById(id);
 
@@ -208,8 +268,16 @@ function thumbUrl(publicId) {
 
 async function loadVideos() {
   const snap = await getDocs(query(collection(db, "videos"), orderBy("createdAt", "desc")));
-  videos = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  videos = snap.docs.map(d => {
+    const v = d.data();
+    return {
+      id: d.id, ...v,
+      people: v.people || [], pairs: v.pairs || [],
+      favorite: v.favorite || false, fileHash: v.fileHash || null
+    };
+  });
   filenameSet = new Set(videos.map(v => v.filename));
+  hashSet = new Set(videos.map(v => v.fileHash).filter(Boolean));
   render();
 }
 
@@ -231,7 +299,7 @@ function search(q) {
   if (!q.trim()) return videos;
   const tokens = tokenize(q);
   const scored = videos.map(v => {
-    const kws = (v.keywords || []).map(k => k.toLowerCase());
+    const kws = [...(v.keywords || []), ...(v.people || []), ...(v.pairs || [])].map(k => k.toLowerCase());
     const fn = v.filename.toLowerCase();
     let score = 0;
     tokens.forEach(t => {
@@ -246,7 +314,8 @@ function search(q) {
 
 function render() {
   const q = $("searchInput").value;
-  const list = search(q);
+  let list = search(q);
+  if (favOnly) list = list.filter(v => v.favorite);
   const grid = $("grid");
   grid.innerHTML = "";
   $("emptyMsg").style.display = list.length ? "none" : "block";
@@ -255,9 +324,11 @@ function render() {
     card.className = "card";
     card.innerHTML = `
       <img loading="lazy" src="${v.thumbnailUrl}" alt="">
+      <button class="star" data-id="${v.id}">${v.favorite ? "★" : "☆"}</button>
       <div class="fn">${ellipsize(v.filename)}</div>
       ${selectMode ? `<div class="chk ${selected.has(v.id) ? 'on' : ''}"></div>` : ""}
     `;
+    card.querySelector(".star").onclick = (e) => { e.stopPropagation(); toggleFavorite(v); };
     card.onclick = () => {
       if (selectMode) {
         if (selected.has(v.id)) selected.delete(v.id); else selected.add(v.id);
@@ -270,6 +341,12 @@ function render() {
   });
 }
 
+async function toggleFavorite(v) {
+  v.favorite = !v.favorite;
+  await updateDoc(doc(db, "videos", v.id), { favorite: v.favorite, updatedAt: serverTimestamp() });
+  render();
+}
+
 function updateSelBar() {
   $("selectBar").classList.toggle("active", selectMode);
   $("selCount").textContent = `${selected.size}개 선택`;
@@ -277,6 +354,12 @@ function updateSelBar() {
 
 $("searchInput").addEventListener("input", render);
 
+$("favFilterBtn").onclick = () => {
+  favOnly = !favOnly;
+  $("favFilterBtn").textContent = favOnly ? "★" : "☆";
+  $("favFilterBtn").classList.toggle("btn", favOnly);
+  render();
+};
 $("selectModeBtn").onclick = () => { selectMode = true; selected.clear(); updateSelBar(); render(); };
 $("cancelSelBtn").onclick = () => { selectMode = false; selected.clear(); updateSelBar(); render(); };
 
@@ -428,21 +511,23 @@ $("saveBundleBtn").onclick = async () => {
 };
 
 $("kwApplyBtn").onclick = async () => {
+  const field = document.querySelector('input[name="kwField"]:checked').value;
   const mode = document.querySelector('input[name="kwMode"]:checked').value;
-  const kws = tokenize($("kwInput").value);
-  if (mode !== "remove" && !kws.length) return alert("검색어를 입력하세요");
+  const raw = field === "pairs"
+    ? $("kwInput").value.split(/[\n,]+/).map(s => s.trim()).filter(Boolean)
+    : tokenize($("kwInput").value);
+  if (mode !== "remove" && !raw.length) return alert("값을 입력하세요");
   const batch = writeBatch(db);
   selected.forEach(id => {
     const v = videos.find(x => x.id === id);
     if (!v) return;
-    let newKw;
-    const cur = new Set(v.keywords || []);
-    if (mode === "add") kws.forEach(k => cur.add(k));
-    else if (mode === "overwrite") { cur.clear(); kws.forEach(k => cur.add(k)); }
-    else if (mode === "remove") kws.forEach(k => cur.delete(k));
-    newKw = [...cur];
-    v.keywords = newKw;
-    batch.update(doc(db, "videos", id), { keywords: newKw });
+    const cur = new Set(v[field] || []);
+    if (mode === "add") raw.forEach(k => cur.add(k));
+    else if (mode === "overwrite") { cur.clear(); raw.forEach(k => cur.add(k)); }
+    else if (mode === "remove") raw.forEach(k => cur.delete(k));
+    const arr = [...cur];
+    v[field] = arr;
+    batch.update(doc(db, "videos", id), { [field]: arr, updatedAt: serverTimestamp() });
   });
   await batch.commit();
   $("kwOverlay").classList.remove("show");

@@ -331,7 +331,17 @@ let noKwOnly = false;
 const $ = (id) => document.getElementById(id);
 
 function thumbUrl(publicId, ver) {
-  return `https://res.cloudinary.com/${CLOUD_NAME}/video/upload/w_400,h_400,c_fill,so_0/${ver ? "v" + ver + "/" : ""}${publicId}.jpg`;
+  if (!publicId) return "";
+  const safePublicId = String(publicId).split("/").map(encodeURIComponent).join("/");
+  return `https://res.cloudinary.com/${CLOUD_NAME}/video/upload/so_0,w_400,h_400,c_fill,f_jpg,q_auto/${ver ? "v" + ver + "/" : ""}${safePublicId}.jpg`;
+}
+function thumbFallbackUrl(publicId, ver) {
+  if (!publicId) return "";
+  const safePublicId = String(publicId).split("/").map(encodeURIComponent).join("/");
+  return `https://res.cloudinary.com/${CLOUD_NAME}/video/upload/so_0,w_400,c_limit,f_jpg,q_auto/${ver ? "v" + ver + "/" : ""}${safePublicId}.jpg`;
+}
+function getThumb(v) {
+  return v.thumbnailUrl || thumbUrl(v.cloudinaryPublicId, v.cloudinaryVersion);
 }
 
 async function loadVideos() {
@@ -413,11 +423,17 @@ function render() {
     card.className = "card" + (selectMode && selected.has(v.id) ? " sel" : "") + (selectMode && v.id === rangeAnchorId ? " anchor" : "");
     card.draggable = false;
     card.innerHTML = `
-      <img loading="lazy" src="${v.thumbnailUrl}" alt="" draggable="false">
+      <img loading="lazy" src="${getThumb(v)}" alt="" draggable="false">
       <button class="star" data-id="${v.id}">${v.favorite ? "★" : "☆"}</button>
       <div class="fn">${ellipsize(v.filename)}</div>
       <div class="chk ${selected.has(v.id) ? 'on' : ''}"></div>
     `;
+    const thumb = card.querySelector("img");
+    thumb.onerror = () => {
+      if (thumb.dataset.fallback === "1" || !v.cloudinaryPublicId) return;
+      thumb.dataset.fallback = "1";
+      thumb.src = thumbFallbackUrl(v.cloudinaryPublicId, v.cloudinaryVersion);
+    };
     card.querySelector(".star").onclick = (e) => { e.stopPropagation(); toggleFavorite(v); };
     card.onclick = (e) => onCardClick(v, e);
     attachLongPress(card, v);
@@ -542,7 +558,15 @@ $("cancelSelBtn").onclick = () => { selectMode = false; selected.clear(); resetR
 let currentDetail = null;
 function openDetail(v) {
   currentDetail = v;
-  $("detailImg").src = v.thumbnailUrl;
+  const detailImg = $("detailImg");
+  detailImg.dataset.fallback = "0";
+  detailImg.onerror = () => {
+    if (detailImg.dataset.fallback === "0" && v.cloudinaryPublicId) {
+      detailImg.dataset.fallback = "1";
+      detailImg.src = thumbFallbackUrl(v.cloudinaryPublicId, v.cloudinaryVersion);
+    }
+  };
+  detailImg.src = getThumb(v);
   $("detailFn").textContent = v.filename;
   renderDetail();
   $("detailOverlay").classList.add("show");
@@ -989,19 +1013,19 @@ async function uploadToCloudinary(file) {
 async function uploadAndSave(item) {
   if (!item.publicId) { // 이전에 Cloudinary는 성공했지만 저장만 실패한 경우 재업로드하지 않음
     const data = await uploadToCloudinary(item.file);
-    item.publicId = data.public_id; item.url = data.secure_url; item.thumb = thumbUrl(data.public_id);
-    item.resourceType = data.resource_type || null;
+    item.publicId = data.public_id; item.url = data.secure_url; item.thumb = thumbUrl(data.public_id, data.version);
+    item.resourceType = data.resource_type || null; item.version = data.version || null;
   }
   const kws = item.keywords && item.keywords.length ? item.keywords : snapshotKeywords;
   item.keywords = kws;
   const docData = {
     filename: item.name, cloudinaryPublicId: item.publicId, cloudinaryUrl: item.url, thumbnailUrl: item.thumb,
-    cloudinaryResourceType: item.resourceType, keywords: kws, fileHash: item.hash || null,
+    cloudinaryResourceType: item.resourceType, cloudinaryVersion: item.version || null, keywords: kws, fileHash: item.hash || null,
     uploadJobId: item.jobId, createdAt: serverTimestamp()
   };
   try { await setDoc(doc(db, "videos", item.jobId), docData); } // 결정적 ID → 재시도해도 중복 문서 없음
   catch (e) { throw new Error("Firebase 영상 저장 실패(Cloudinary 업로드는 완료됨): " + e.message); }
-  if (!videos.some(v => v.id === item.jobId)) videos.unshift({ id: item.jobId, ...docData, people: [], pairs: [], favorite: false });
+  if (!videos.some(v => v.id === item.jobId)) videos.unshift({ id: item.jobId, ...docData, people: [], pairs: [], favorite: false, cloudinaryVersion: item.version || null });
   if (item.hash) hashIndex.set(item.hash, { jobId: item.jobId, publicId: item.publicId, url: item.url, thumb: item.thumb });
   return { jobId: item.jobId, publicId: item.publicId, url: item.url, thumb: item.thumb };
 }
@@ -1021,10 +1045,10 @@ async function overwriteAndSave(item) {
   if (!old) return uploadAndSave(item);
   if (!item.publicId) {
     const d = await uploadToCloudinary(item.file);
-    item.publicId = d.public_id; item.url = d.secure_url; item.thumb = thumbUrl(d.public_id, d.version); item.resourceType = d.resource_type || null;
+    item.publicId = d.public_id; item.url = d.secure_url; item.thumb = thumbUrl(d.public_id, d.version); item.resourceType = d.resource_type || null; item.version = d.version || null;
   }
   const patch = { cloudinaryPublicId: item.publicId, cloudinaryUrl: item.url, thumbnailUrl: item.thumb,
-    cloudinaryResourceType: item.resourceType, fileHash: item.hash || null, uploadJobId: item.jobId }; // filename·검색어·인물·조합·favorite은 건드리지 않음
+    cloudinaryResourceType: item.resourceType, cloudinaryVersion: item.version || null, fileHash: item.hash || null, uploadJobId: item.jobId }; // filename·검색어·인물·조합·favorite은 건드리지 않음
   try { await updateDoc(doc(db, "videos", old.id), { ...patch, updatedAt: serverTimestamp() }); }
   catch (e) { throw new Error("Firebase 영상 갱신 실패(기존 데이터는 유지됨): " + e.message); }
   const oldPid = old.cloudinaryPublicId, oldHash = old.fileHash;

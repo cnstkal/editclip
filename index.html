@@ -252,6 +252,7 @@
     <button class="btn secondary" id="reconnectBtn" style="width:100%;margin-top:6px;display:none;">이전에 선택한 파일 다시 연결</button>
     <div id="uploadNotice" style="font-size:12px;color:#8a4b00;margin-top:8px;"></div>
     <div id="diagText" style="font-size:11px;color:#888;margin-top:4px;word-break:break-all;"></div>
+    <pre id="cldLog" style="display:none;font-size:11px;color:#a31c2b;background:#fdf3f4;border:1px solid #f0c4c9;border-radius:8px;padding:8px;margin:6px 0 0;max-height:160px;overflow:auto;white-space:pre-wrap;word-break:break-all;user-select:text;-webkit-user-select:text;"></pre>
     <div id="fileList"></div>
   </div>
 </div>
@@ -639,6 +640,12 @@ function diag(msg, isErr) {
   (isErr ? console.error : console.log)("[upload]", msg);
   const el = $("diagText"); if (el) { el.textContent = line; el.style.color = isErr ? "#a31c2b" : "#888"; }
 }
+const cldLogLines = [];
+function cldLog(msg) { // Cloudinary 오류 상세를 업로드 화면에 최근 20줄까지 남긴다 (복사 가능)
+  cldLogLines.push(`[${new Date().toLocaleTimeString()}] ${msg}`);
+  if (cldLogLines.length > 20) cldLogLines.shift();
+  const el = $("cldLog"); if (el) { el.style.display = "block"; el.textContent = cldLogLines.join("\n"); el.scrollTop = el.scrollHeight; }
+}
 let toastTimer = null;
 function toast(msg) {
   const el = $("toast"); el.textContent = msg; el.style.display = "block";
@@ -951,10 +958,19 @@ async function uploadToCloudinary(file) {
       fd.append("upload_preset", UPLOAD_PRESET);
       diag(`POST ${CLD_ENDPOINT} ← ${file.name} (${(file.size / 1048576).toFixed(1)}MB) 시도 ${attempt + 1}`);
       const res = await fetch(CLD_ENDPOINT, { method: "POST", body: fd, signal: ctrl.signal });
-      let data = null; try { data = await res.json(); } catch (_) {}
+      let rawText = ""; try { rawText = await res.text(); } catch (_) {}
+      let data = null; try { data = JSON.parse(rawText); } catch (_) {}
       if (!res.ok) {
-        const err = new Error(`Cloudinary ${res.status}: ${data?.error?.message || res.statusText || "업로드 실패"}`);
-        err.retryable = res.status === 429 || res.status >= 500; throw err;
+        const cldErr = res.headers.get("X-Cld-Error"); // CORS에서 노출되지 않으면 null
+        const msg = data?.error?.message || res.statusText || "업로드 실패";
+        const err = new Error(`Cloudinary ${res.status}: ${msg}` + (cldErr && cldErr !== msg ? ` (X-Cld-Error: ${cldErr})` : ""));
+        err.status = res.status;
+        err.retryable = res.status === 429 || res.status >= 500;
+        err.blocked = res.status === 401 || res.status === 403; // 계정/프리셋 차단 → 재시도해도 소용없음
+        const detail = `${res.status} ${res.statusText || ""} | file=${file.name} | preset=${UPLOAD_PRESET} | endpoint=${CLD_ENDPOINT} | X-Cld-Error=${cldErr ?? "(없음 또는 CORS로 숨김)"} | body=${(rawText || "(빈 본문)").slice(0, 500)}`;
+        console.error("[cloudinary]", detail);
+        cldLog(detail);
+        throw err;
       }
       if (!data || !data.secure_url || !data.public_id) throw new Error("Cloudinary 응답에 secure_url/public_id가 없습니다");
       return data;
@@ -1037,8 +1053,17 @@ async function processItem(item) {
     if (item.publicId && videos.some(v => v.id !== item.jobId && v.cloudinaryPublicId === item.publicId))
       toast(`주의: 다른 영상과 Cloudinary public_id가 같습니다 (${item.name}). 업로드 프리셋의 unique filename 설정을 확인하세요.`);
   } catch (e) {
-    item.status = "failed"; item.error = e.message || String(e);
-    diag(`실패: ${item.name} — ${item.error}`, true);
+    item.error = e.message || String(e);
+    if (e.blocked) {
+      // Cloudinary가 요청 자체를 거부(401/403): 계속 보내면 실패만 쌓이므로 큐를 멈추고, 파일은 [재개]로 다시 올릴 수 있게 paused로 보존
+      item.status = "paused";
+      if (runState === "running") {
+        runState = "paused";
+        cldLog("Cloudinary가 업로드를 거부해 큐를 일시정지했습니다. 이 오류는 파일 문제가 아니라 계정/프리셋 상태 문제일 수 있습니다: Cloudinary 대시보드에서 크레딧·스토리지 사용량, 계정 상태, 업로드 프리셋(editclip)의 Unsigned 여부를 확인한 뒤 [재개]를 누르세요.");
+        toast("Cloudinary 401/403 — 업로드를 일시정지했습니다. 업로드 관리 화면의 오류 로그를 확인하세요");
+      }
+    } else item.status = "failed";
+    diag(`${item.status === "paused" ? "중지" : "실패"}: ${item.name} — ${item.error}`, true);
   }
   await persist(item);
   renderFileList(); scheduleGridRender();

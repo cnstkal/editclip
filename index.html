@@ -341,7 +341,26 @@ function thumbFallbackUrl(publicId, ver) {
   return `https://res.cloudinary.com/${CLOUD_NAME}/video/upload/so_0,w_400,c_limit,f_jpg,q_auto/${ver ? "v" + ver + "/" : ""}${safePublicId}.jpg`;
 }
 function getThumb(v) {
+  // 기존에 저장된 thumbnailUrl보다 실제 원본 secure_url에서 파생한 URL을 우선 사용
+  // public_id에 확장자가 포함된 경우에도 원본 경로를 그대로 보존한다.
+  if (v.cloudinaryUrl) {
+    const base = String(v.cloudinaryUrl).replace(
+      "/video/upload/",
+      "/video/upload/so_0,w_400,h_400,c_fill,f_jpg,q_auto/"
+    );
+    return base.replace(/\.[^./?]+(?=\?|$)/, ".jpg");
+  }
   return v.thumbnailUrl || thumbUrl(v.cloudinaryPublicId, v.cloudinaryVersion);
+}
+function getThumbFallback(v) {
+  if (v.cloudinaryUrl) {
+    const base = String(v.cloudinaryUrl).replace(
+      "/video/upload/",
+      "/video/upload/so_0,w_400,c_limit,f_jpg,q_auto/"
+    );
+    return base.replace(/\.[^./?]+(?=\?|$)/, ".jpg");
+  }
+  return thumbFallbackUrl(v.cloudinaryPublicId, v.cloudinaryVersion);
 }
 
 async function loadVideos() {
@@ -432,7 +451,7 @@ function render() {
     thumb.onerror = () => {
       if (thumb.dataset.fallback === "1" || !v.cloudinaryPublicId) return;
       thumb.dataset.fallback = "1";
-      thumb.src = thumbFallbackUrl(v.cloudinaryPublicId, v.cloudinaryVersion);
+      thumb.src = getThumbFallback(v);
     };
     card.querySelector(".star").onclick = (e) => { e.stopPropagation(); toggleFavorite(v); };
     card.onclick = (e) => onCardClick(v, e);
@@ -563,7 +582,7 @@ function openDetail(v) {
   detailImg.onerror = () => {
     if (detailImg.dataset.fallback === "0" && v.cloudinaryPublicId) {
       detailImg.dataset.fallback = "1";
-      detailImg.src = thumbFallbackUrl(v.cloudinaryPublicId, v.cloudinaryVersion);
+      detailImg.src = getThumbFallback(v);
     }
   };
   detailImg.src = getThumb(v);

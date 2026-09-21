@@ -65,6 +65,13 @@
   }
   .kwTag { display:inline-flex; align-items:center; gap:4px; background:#f0f0f0; border-radius:14px; padding:4px 10px; margin:3px; font-size:12px; }
   .kwTag button { border:none; background:none; cursor:pointer; font-size:12px; color:#999; }
+  .card { -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
+  .card.anchor { outline:3px solid #2d6cdf; outline-offset:-3px; }
+  #filterBar { display:flex; max-width:900px; margin:8px auto 0; gap:10px; align-items:center; flex-wrap:wrap; }
+  #noKwBtn { padding:10px 14px; }
+  #noKwBtn.on { background:#1a1a1a; color:#fff; border-color:#1a1a1a; font-weight:600; }
+  #filterInfo { font-size:13px; color:#666; }
+  #selHint { flex-basis:100%; font-size:12px; color:#2d6cdf; }
   .empty { text-align:center; color:#999; padding:60px 0; font-size:14px; }
 
   .overlay {
@@ -118,11 +125,16 @@
     <button class="btn secondary" id="selectModeBtn">선택</button>
     <button class="btn" id="uploadOpenBtn">＋ 업로드</button>
   </div>
+  <div id="filterBar">
+    <button class="btn secondary" id="noKwBtn" aria-pressed="false">검색어 없는 것만</button>
+    <span id="filterInfo"></span>
+  </div>
   <button id="statusBar"></button>
   <div id="selectBar">
     <span id="selCount">0개 선택</span>
     <button class="btn secondary" id="applyKwBtn">검색어 적용</button>
     <button class="btn secondary" id="cancelSelBtn">취소</button>
+    <span id="selHint">PC: 첫 카드 클릭 → Shift+마지막 카드 클릭 / 모바일: 첫 카드 길게 누르기 → 마지막 카드 탭</span>
   </div>
 </header>
 
@@ -268,6 +280,7 @@ let bundles = [];
 let selectMode = false;
 let selected = new Set();
 let favOnly = false;
+let noKwOnly = false;
 
 const $ = (id) => document.getElementById(id);
 
@@ -322,16 +335,36 @@ function search(q) {
   return scored.map(x => x.v);
 }
 
+// 「검색어 없음」 판단은 오직 keywords 기준 (people/pairs/favorite/filename 무관)
+function hasKeywords(v) {
+  return Array.isArray(v.keywords) && v.keywords.some(k => String(k ?? "").trim().length > 0);
+}
+
+let visibleList = [];          // 현재 화면에 표시 중인 영상 (범위 선택 기준)
+let cardEls = new Map();       // id -> 카드 요소 (선택 표시만 부분 갱신)
+let rangeAnchorId = null;      // 범위 선택 시작점
+let pendingRange = false;      // 모바일: 길게 눌러 시작점이 지정된 상태
+let suppressClick = false;
+let pruneNext = false;
+
 function render() {
   const q = $("searchInput").value;
   let list = search(q);
   if (favOnly) list = list.filter(v => v.favorite);
-  const grid = $("grid");
-  grid.innerHTML = "";
-  $("emptyMsg").style.display = list.length ? "none" : "block";
+  if (noKwOnly) list = list.filter(v => !hasKeywords(v));
+  visibleList = list;
+  if (pruneNext) { // 필터를 바꿨을 때 화면에서 사라진 영상이 선택에 남아 있지 않도록 정리
+    pruneNext = false;
+    const vis = new Set(list.map(v => v.id));
+    [...selected].forEach(id => { if (!vis.has(id)) selected.delete(id); });
+    if (rangeAnchorId && !vis.has(rangeAnchorId)) { rangeAnchorId = null; pendingRange = false; }
+    updateSelBar();
+  }
+  cardEls = new Map();
+  const frag = document.createDocumentFragment();
   list.forEach(v => {
     const card = document.createElement("div");
-    card.className = "card";
+    card.className = "card" + (v.id === rangeAnchorId && selectMode ? " anchor" : "");
     card.innerHTML = `
       <img loading="lazy" src="${v.thumbnailUrl}" alt="">
       <button class="star" data-id="${v.id}">${v.favorite ? "★" : "☆"}</button>
@@ -339,16 +372,76 @@ function render() {
       ${selectMode ? `<div class="chk ${selected.has(v.id) ? 'on' : ''}"></div>` : ""}
     `;
     card.querySelector(".star").onclick = (e) => { e.stopPropagation(); toggleFavorite(v); };
-    card.onclick = () => {
-      if (selectMode) {
-        if (selected.has(v.id)) selected.delete(v.id); else selected.add(v.id);
-        render(); updateSelBar();
-      } else {
-        openDetail(v);
-      }
-    };
-    grid.appendChild(card);
+    card.onclick = (e) => onCardClick(v, e);
+    card.oncontextmenu = (e) => { if (selectMode) e.preventDefault(); };
+    attachLongPress(card, v);
+    cardEls.set(v.id, card);
+    frag.appendChild(card);
   });
+  $("grid").replaceChildren(frag);
+  const empty = $("emptyMsg");
+  empty.textContent = (noKwOnly && !list.length) ? "검색어가 없는 영상이 없습니다" : "결과가 없습니다";
+  empty.style.display = list.length ? "none" : "block";
+  $("filterInfo").textContent = noKwOnly ? `검색어 없는 영상 ${list.length.toLocaleString()}개` : "";
+}
+
+// ----- 선택 (DOM 전체 재생성 없이 해당 카드만 갱신) -----
+function setSelected(id, on) {
+  if (on) selected.add(id); else selected.delete(id);
+  const el = cardEls.get(id);
+  const chk = el && el.querySelector(".chk");
+  if (chk) chk.classList.toggle("on", on);
+}
+function selectRange(aId, bId) {
+  const a = visibleList.findIndex(v => v.id === aId);
+  const b = visibleList.findIndex(v => v.id === bId);
+  if (a < 0 || b < 0) { setSelected(bId, true); return; }
+  const lo = Math.min(a, b), hi = Math.max(a, b);
+  for (let i = lo; i <= hi; i++) setSelected(visibleList[i].id, true);
+}
+function markAnchor() {
+  cardEls.forEach((el, id) => el.classList.toggle("anchor", selectMode && id === rangeAnchorId));
+  $("selHint").style.fontWeight = pendingRange ? "700" : "400";
+}
+function onCardClick(v, e) {
+  if (suppressClick) { suppressClick = false; return; }
+  if (!selectMode) { openDetail(v); return; }
+  if (pendingRange && rangeAnchorId) {            // 모바일: 길게 누른 카드 ~ 탭한 카드
+    selectRange(rangeAnchorId, v.id); pendingRange = false;
+  } else if (e.shiftKey && rangeAnchorId) {       // PC: 이전 클릭 카드 ~ Shift+클릭 카드
+    selectRange(rangeAnchorId, v.id);
+  } else {
+    setSelected(v.id, !selected.has(v.id));
+  }
+  rangeAnchorId = v.id;
+  markAnchor(); updateSelBar();
+}
+function attachLongPress(card, v) {
+  let timer = null, sx = 0, sy = 0, fired = false;
+  const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  card.addEventListener("touchstart", (e) => {
+    if (e.touches.length !== 1) return;
+    fired = false; sx = e.touches[0].clientX; sy = e.touches[0].clientY;
+    cancel();
+    timer = setTimeout(() => {
+      timer = null; fired = true; suppressClick = true;
+      if (!selectMode) { selectMode = true; selected.clear(); }
+      selected.add(v.id); rangeAnchorId = v.id; pendingRange = true;
+      updateSelBar(); render();
+      if (navigator.vibrate) navigator.vibrate(30);
+      toast("시작점 지정 — 마지막 영상을 탭하세요");
+    }, 450);
+  }, { passive: true });
+  card.addEventListener("touchmove", (e) => {
+    const t = e.touches[0];
+    if (Math.abs(t.clientX - sx) > 10 || Math.abs(t.clientY - sy) > 10) cancel();
+  }, { passive: true });
+  const end = (e) => {
+    cancel();
+    if (fired) { if (e.cancelable) e.preventDefault(); setTimeout(() => { suppressClick = false; }, 350); fired = false; }
+  };
+  card.addEventListener("touchend", end, { passive: false });
+  card.addEventListener("touchcancel", end, { passive: false });
 }
 
 async function toggleFavorite(v) {
@@ -365,13 +458,22 @@ function updateSelBar() {
 $("searchInput").addEventListener("input", render);
 
 $("favFilterBtn").onclick = () => {
-  favOnly = !favOnly;
+  favOnly = !favOnly; pruneNext = true;
   $("favFilterBtn").textContent = favOnly ? "★" : "☆";
   $("favFilterBtn").classList.toggle("btn", favOnly);
   render();
 };
-$("selectModeBtn").onclick = () => { selectMode = true; selected.clear(); updateSelBar(); render(); };
-$("cancelSelBtn").onclick = () => { selectMode = false; selected.clear(); updateSelBar(); render(); };
+$("noKwBtn").onclick = () => {
+  noKwOnly = !noKwOnly; pruneNext = true;
+  const b = $("noKwBtn");
+  b.classList.toggle("on", noKwOnly);
+  b.setAttribute("aria-pressed", noKwOnly);
+  b.textContent = noKwOnly ? "✓ 검색어 없는 것만" : "검색어 없는 것만";
+  render(); // 메모리의 videos 기준 필터링 (Firestore 요청 없음)
+};
+function resetRange() { rangeAnchorId = null; pendingRange = false; }
+$("selectModeBtn").onclick = () => { selectMode = true; selected.clear(); resetRange(); updateSelBar(); render(); };
+$("cancelSelBtn").onclick = () => { selectMode = false; selected.clear(); resetRange(); updateSelBar(); render(); };
 
 // ---------- 상세 보기 ----------
 let currentDetail = null;
@@ -1049,7 +1151,7 @@ $("kwApplyBtn").onclick = async () => {
     ? $("kwInput").value.split(/[\n,]+/).map(s => s.trim()).filter(Boolean)
     : tokenize($("kwInput").value);
   if (mode !== "remove" && !raw.length) return alert("값을 입력하세요");
-  const batch = writeBatch(db);
+  const targets = [];
   selected.forEach(id => {
     const v = videos.find(x => x.id === id);
     if (!v) return;
@@ -1057,13 +1159,29 @@ $("kwApplyBtn").onclick = async () => {
     if (mode === "add") raw.forEach(k => cur.add(k));
     else if (mode === "overwrite") { cur.clear(); raw.forEach(k => cur.add(k)); }
     else if (mode === "remove") raw.forEach(k => cur.delete(k));
-    const arr = [...cur];
-    v[field] = arr;
-    batch.update(doc(db, "videos", id), { [field]: arr, updatedAt: serverTimestamp() });
+    targets.push({ v, arr: [...cur] });
   });
-  await batch.commit();
+  const btn = $("kwApplyBtn"); btn.disabled = true;
+  try {
+    // Firestore 배치는 500건 제한 → 400건씩 나눠 커밋, 저장 성공한 것만 메모리에 반영
+    for (let i = 0; i < targets.length; i += 400) {
+      const chunk = targets.slice(i, i + 400);
+      const batch = writeBatch(db);
+      chunk.forEach(({ v, arr }) => batch.update(doc(db, "videos", v.id), { [field]: arr, updatedAt: serverTimestamp() }));
+      await batch.commit();
+      chunk.forEach(({ v, arr }) => { v[field] = arr; });
+    }
+  } catch (e) {
+    alert("저장 중 오류가 발생했습니다. 일부만 저장됐을 수 있습니다.\n" + e.message);
+    render(); btn.disabled = false; return;
+  }
+  btn.disabled = false;
   $("kwOverlay").classList.remove("show");
-  selectMode = false; selected.clear(); updateSelBar(); render();
+  selected.clear(); resetRange();
+  // 「검색어 없는 것만」 ON이면 선택 모드를 유지해 바로 다음 묶음을 이어서 처리
+  if (!(noKwOnly && field === "keywords")) selectMode = false;
+  updateSelBar(); render(); // 저장된 영상은 필터에서 즉시 사라짐
+  toast(`${targets.length}개 영상에 적용했습니다`);
 };
 
 // ---------- init ----------

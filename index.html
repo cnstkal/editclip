@@ -389,7 +389,10 @@ function getThumbFallback(v) {
 }
 
 async function loadVideos() {
-  const snap = await getDocs(query(collection(db, "videos"), orderBy("createdAt", "desc")));
+  // createdAt이 없는 예전 문서도 반드시 불러온다.
+  // Firestore orderBy(createdAt)는 해당 필드가 없는 문서를 결과에서 제외할 수 있어
+  // 기존 영상이 "전부 사라진 것처럼" 보이는 문제가 생길 수 있다.
+  const snap = await getDocs(collection(db, "videos"));
   videos = snap.docs.map(d => {
     const v = d.data();
     return {
@@ -397,6 +400,11 @@ async function loadVideos() {
       people: v.people || [], pairs: v.pairs || [],
       favorite: v.favorite || false, fileHash: v.fileHash || null
     };
+  });
+  videos.sort((a, b) => {
+    const ta = a.createdAt?.toMillis ? a.createdAt.toMillis() : (a.createdAt ? new Date(a.createdAt).getTime() : 0);
+    const tb = b.createdAt?.toMillis ? b.createdAt.toMillis() : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
+    return tb - ta;
   });
   filenameSet = new Set(videos.map(v => v.filename));
   hashSet = new Set(videos.map(v => v.fileHash).filter(Boolean));

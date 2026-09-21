@@ -669,22 +669,39 @@ $("deleteBtn").onclick = async () => {
   rebuildHashIndex(); currentDetail = null;
   $("detailOverlay").classList.remove("show"); render(); renderFileList();
 };
-$("downloadBtn").onclick = async () => {
+function getOriginalDownloadUrl(v) {
+  if (!v?.cloudinaryUrl) return "";
+  const filename = String(v.filename || "video").replace(/[\\/]/g, "_");
+  const safeName = encodeURIComponent(filename);
+  const raw = String(v.cloudinaryUrl);
+  if (!raw.includes("/video/upload/")) return raw;
+  // fetch→Blob 방식은 iPhone Safari에서 cross-origin 영상이 확장자 없는
+  // 이상한 파일로 저장되거나 손상된 것처럼 보일 수 있다.
+  // Cloudinary의 fl_attachment는 영상 바이트 자체를 변환하지 않고
+  // 원본을 첨부파일로 내려받게 하며 지정한 원본 파일명을 사용한다.
+  if (raw.includes("/video/upload/fl_attachment")) return raw;
+  return raw.replace("/video/upload/", "/video/upload/fl_attachment:" + safeName + "/");
+}
+$("downloadBtn").onclick = () => {
   if (!currentDetail) return;
   const btn = $("downloadBtn");
-  btn.disabled = true; btn.textContent = "다운로드 중...";
+  const url = getOriginalDownloadUrl(currentDetail);
+  if (!url) return alert("원본 파일 주소가 없습니다.");
+  btn.disabled = true; btn.textContent = "다운로드 준비...";
   try {
-    const res = await fetch(currentDetail.cloudinaryUrl);
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = currentDetail.filename;
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
+    a.href = url;
+    a.download = currentDetail.filename || "video";
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   } catch (e) {
     alert("다운로드 실패: " + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "원본 저장";
   }
-  btn.disabled = false; btn.textContent = "원본 저장";
 };
 
 // ---------- 업로드 ----------

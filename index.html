@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>영상 아카이브</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css">
+<style>
+  * { box-sizing: border-box; }
+  html, body { overflow-x: hidden; touch-action: pan-y; margin:0; }
+  body {
+    font-family: 'Pretendard', -apple-system, sans-serif;
+    letter-spacing: -0.02em;
+    background:#fafafa; color:#1a1a1a;
+    padding-bottom: 60px;
+  }
+  input, textarea, button { font-family: inherit; letter-spacing: inherit; }
+  input, textarea { font-size:16px; }
+
+  header {
+    position: sticky; top:0; background:#fafafa; z-index:10;
+    padding:16px; border-bottom:1px solid #eee;
+  }
+  .topbar { display:flex; gap:8px; max-width:900px; margin:0 auto; }
+  #searchInput {
+    flex:1; padding:12px 14px; border:1px solid #ddd; border-radius:10px;
+    font-size:16px; outline:none;
+  }
+  #searchInput:focus { border-color:#333; }
+  .btn {
+    padding:12px 16px; border:none; border-radius:10px; background:#1a1a1a; color:#fff;
+    cursor:pointer; font-size:14px; white-space:nowrap;
+  }
+  .btn.secondary { background:#fff; color:#1a1a1a; border:1px solid #ddd; }
+  .btn:disabled { opacity:.4; cursor:default; }
+
+  #selectBar {
+    display:none; max-width:900px; margin:8px auto 0; gap:8px; align-items:center; flex-wrap:wrap;
+    padding:0 16px;
+  }
+  #selectBar.active { display:flex; }
+  #selectBar span { font-size:13px; color:#666; }
+
+  main { max-width:900px; margin:0 auto; padding:16px; }
+  .grid {
+    display:grid; grid-template-columns: repeat(3, 1fr); gap:14px;
+  }
+  @media (max-width:640px) {
+    .grid { grid-template-columns: repeat(2, 1fr); gap:10px; }
+  }
+  .card {
+    cursor:pointer; position:relative; background:#fff; border-radius:10px; overflow:hidden;
+    border:1px solid #eee;
+  }
+  .card img { width:100%; aspect-ratio:1/1; object-fit:cover; display:block; background:#eee; }
+  .card .fn { font-size:12px; padding:6px 8px; color:#444; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .card .chk {
+    position:absolute; top:6px; left:6px; width:20px; height:20px; border-radius:50%;
+    border:2px solid #fff; background:rgba(0,0,0,.25);
+  }
+  .card .chk.on { background:#1a1a1a; }
+  .empty { text-align:center; color:#999; padding:60px 0; font-size:14px; }
+
+  .overlay {
+    display:none; position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:100;
+    align-items:center; justify-content:center; padding:16px;
+  }
+  .overlay.show { display:flex; }
+  .sheet {
+    background:#fff; border-radius:14px; width:100%; max-width:480px; max-height:88vh;
+    overflow-y:auto; padding:20px;
+  }
+  .sheet h3 { margin:0 0 14px; font-size:16px; }
+  .sheet .close { float:right; background:none; border:none; font-size:18px; cursor:pointer; }
+  .sheet textarea { width:100%; min-height:80px; padding:10px; border:1px solid #ddd; border-radius:8px; resize:vertical; }
+  .sheet .row { margin-bottom:14px; }
+  .bundleChip {
+    display:inline-block; padding:6px 12px; margin:3px; border-radius:16px; background:#f0f0f0;
+    font-size:13px; cursor:pointer; border:1px solid #ddd;
+  }
+
+  #detailImg { width:100%; border-radius:10px; margin-bottom:14px; background:#eee; }
+  #detailFn { font-size:14px; word-break:break-all; margin-bottom:16px; color:#333; }
+
+  .fileRow { display:flex; justify-content:space-between; align-items:center; font-size:12px; padding:4px 0; border-bottom:1px solid #f2f2f2; }
+  .fileRow .st { font-size:11px; padding:2px 6px; border-radius:6px; }
+  .st.pending { background:#eee; color:#666; }
+  .st.uploading { background:#fff3cd; color:#946c00; }
+  .st.success { background:#d4edda; color:#1c6b31; }
+  .st.fail { background:#f8d7da; color:#a31c2b; }
+  .st.dup { background:#e2e3e5; color:#555; }
+  #fileList { max-height:220px; overflow-y:auto; margin-top:8px; }
+  #progressWrap { background:#eee; border-radius:6px; overflow:hidden; height:8px; margin-top:10px; }
+  #progressBar { background:#1a1a1a; height:100%; width:0%; transition:width .2s; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="topbar">
+    <input id="searchInput" placeholder="자연어로 검색 (예: 공항에서 캐리어 끌던 윤호)">
+    <button class="btn secondary" id="selectModeBtn">선택</button>
+    <button class="btn" id="uploadOpenBtn">＋ 업로드</button>
+  </div>
+  <div id="selectBar">
+    <span id="selCount">0개 선택</span>
+    <button class="btn secondary" id="applyKwBtn">검색어 적용</button>
+    <button class="btn secondary" id="cancelSelBtn">취소</button>
+  </div>
+</header>
+
+<main>
+  <div class="grid" id="grid"></div>
+  <div class="empty" id="emptyMsg" style="display:none;">결과가 없습니다</div>
+</main>
+
+<!-- 상세 모달 -->
+<div class="overlay" id="detailOverlay">
+  <div class="sheet">
+    <button class="close" id="detailClose">✕</button>
+    <img id="detailImg">
+    <div id="detailFn"></div>
+    <button class="btn" id="downloadBtn" style="width:100%;">원본 저장</button>
+  </div>
+</div>
+
+<!-- 업로드 모달 -->
+<div class="overlay" id="uploadOverlay">
+  <div class="sheet">
+    <button class="close" id="uploadClose">✕</button>
+    <h3>영상 업로드</h3>
+    <div class="row">
+      <input type="file" id="fileInput" multiple accept="video/*" style="display:none;">
+      <input type="file" id="folderInput" webkitdirectory multiple style="display:none;">
+      <button class="btn secondary" id="pickFilesBtn">파일 선택</button>
+      <button class="btn secondary" id="pickFolderBtn">폴더 선택</button>
+    </div>
+    <div class="row">
+      <textarea id="uploadKwInput" placeholder="검색어 (쉼표 또는 줄바꿈, 선택 사항)"></textarea>
+    </div>
+    <button class="btn" id="startUploadBtn" style="width:100%;">업로드 시작</button>
+    <button class="btn secondary" id="retryFailBtn" style="width:100%;margin-top:6px;display:none;">실패한 파일만 재시도</button>
+    <div id="progressWrap"><div id="progressBar"></div></div>
+    <div id="progressText" style="font-size:12px;color:#666;margin-top:6px;"></div>
+    <div id="fileList"></div>
+  </div>
+</div>
+
+<!-- 검색어 적용 모달 -->
+<div class="overlay" id="kwOverlay">
+  <div class="sheet">
+    <button class="close" id="kwClose">✕</button>
+    <h3>검색어 적용 (<span id="kwTargetCount">0</span>개 영상)</h3>
+    <div class="row">
+      <textarea id="kwInput" placeholder="검색어 (쉼표 또는 줄바꿈)"></textarea>
+    </div>
+    <div class="row">
+      <label><input type="radio" name="kwMode" value="add" checked> 기존에 추가</label>
+      <label><input type="radio" name="kwMode" value="overwrite"> 덮어쓰기</label>
+      <label><input type="radio" name="kwMode" value="remove"> 삭제</label>
+    </div>
+    <div class="row" id="bundleList"></div>
+    <div class="row">
+      <input id="bundleNameInput" placeholder="현재 검색어를 묶음으로 저장할 이름" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:8px;">
+      <button class="btn secondary" id="saveBundleBtn" style="margin-top:6px;">묶음 저장</button>
+    </div>
+    <button class="btn" id="kwApplyBtn" style="width:100%;">적용</button>
+  </div>
+</div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import {
+  getFirestore, collection, getDocs, addDoc, updateDoc, doc,
+  serverTimestamp, query, orderBy, writeBatch
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyBtovIReWBTVBifTFdDzSV5pqAvYtgiaM8",
+  authDomain: "etidclip.firebaseapp.com",
+  projectId: "etidclip",
+  storageBucket: "etidclip.firebasestorage.app",
+  messagingSenderId: "1059739626015",
+  appId: "1:1059739626015:web:44313cffbc7b39b4e9c32a"
+};
+const fbApp = initializeApp(firebaseConfig);
+const db = getFirestore(fbApp);
+
+const CLOUD_NAME = "qm0m5g4o";
+// Cloudinary Secret은 사용하지 않음 (unsigned upload preset 사용).
+let UPLOAD_PRESET = localStorage.getItem("cld_upload_preset");
+if (!UPLOAD_PRESET) {
+  UPLOAD_PRESET = prompt("Cloudinary Unsigned Upload Preset 이름을 입력하세요\n(Cloudinary 콘솔 > Settings > Upload > Unsigned preset 생성)");
+  if (UPLOAD_PRESET) localStorage.setItem("cld_upload_preset", UPLOAD_PRESET.trim());
+}
+
+let videos = [];      // {id, filename, cloudinaryUrl, thumbnailUrl, cloudinaryPublicId, keywords}
+let filenameSet = new Set();
+let bundles = [];
+let selectMode = false;
+let selected = new Set();
+
+const $ = (id) => document.getElementById(id);
+
+function thumbUrl(publicId) {
+  return `https://res.cloudinary.com/${CLOUD_NAME}/video/upload/w_400,h_400,c_fill,so_0/${publicId}.jpg`;
+}
+
+async function loadVideos() {
+  const snap = await getDocs(query(collection(db, "videos"), orderBy("createdAt", "desc")));
+  videos = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  filenameSet = new Set(videos.map(v => v.filename));
+  render();
+}
+
+async function loadBundles() {
+  const snap = await getDocs(collection(db, "bundles"));
+  bundles = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+}
+
+function ellipsize(name) {
+  if (name.length <= 22) return name;
+  return name.slice(0, 10) + "..." + name.slice(-9);
+}
+
+function tokenize(q) {
+  return q.split(/[\s,]+/).map(s => s.trim().toLowerCase()).filter(Boolean);
+}
+
+function search(q) {
+  if (!q.trim()) return videos;
+  const tokens = tokenize(q);
+  const scored = videos.map(v => {
+    const kws = (v.keywords || []).map(k => k.toLowerCase());
+    const fn = v.filename.toLowerCase();
+    let score = 0;
+    tokens.forEach(t => {
+      if (kws.some(k => k.includes(t) || t.includes(k))) score += 2;
+      if (fn.includes(t)) score += 1;
+    });
+    return { v, score };
+  }).filter(x => x.score > 0);
+  scored.sort((a, b) => b.score - a.score);
+  return scored.map(x => x.v);
+}
+
+function render() {
+  const q = $("searchInput").value;
+  const list = search(q);
+  const grid = $("grid");
+  grid.innerHTML = "";
+  $("emptyMsg").style.display = list.length ? "none" : "block";
+  list.forEach(v => {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `
+      <img loading="lazy" src="${v.thumbnailUrl}" alt="">
+      <div class="fn">${ellipsize(v.filename)}</div>
+      ${selectMode ? `<div class="chk ${selected.has(v.id) ? 'on' : ''}"></div>` : ""}
+    `;
+    card.onclick = () => {
+      if (selectMode) {
+        if (selected.has(v.id)) selected.delete(v.id); else selected.add(v.id);
+        render(); updateSelBar();
+      } else {
+        openDetail(v);
+      }
+    };
+    grid.appendChild(card);
+  });
+}
+
+function updateSelBar() {
+  $("selectBar").classList.toggle("active", selectMode);
+  $("selCount").textContent = `${selected.size}개 선택`;
+}
+
+$("searchInput").addEventListener("input", render);
+
+$("selectModeBtn").onclick = () => { selectMode = true; selected.clear(); updateSelBar(); render(); };
+$("cancelSelBtn").onclick = () => { selectMode = false; selected.clear(); updateSelBar(); render(); };
+
+// ---------- 상세 보기 ----------
+let currentDetail = null;
+function openDetail(v) {
+  currentDetail = v;
+  $("detailImg").src = v.thumbnailUrl;
+  $("detailFn").textContent = v.filename;
+  $("detailOverlay").classList.add("show");
+}
+$("detailClose").onclick = () => $("detailOverlay").classList.remove("show");
+$("downloadBtn").onclick = async () => {
+  if (!currentDetail) return;
+  const btn = $("downloadBtn");
+  btn.disabled = true; btn.textContent = "다운로드 중...";
+  try {
+    const res = await fetch(currentDetail.cloudinaryUrl);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = currentDetail.filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert("다운로드 실패: " + e.message);
+  }
+  btn.disabled = false; btn.textContent = "원본 저장";
+};
+
+// ---------- 업로드 ----------
+$("uploadOpenBtn").onclick = () => { $("uploadOverlay").classList.add("show"); };
+$("uploadClose").onclick = () => $("uploadOverlay").classList.remove("show");
+$("pickFilesBtn").onclick = () => $("fileInput").click();
+$("pickFolderBtn").onclick = () => $("folderInput").click();
+
+let queueItems = []; // {file, status, error}
+$("fileInput").onchange = (e) => addFiles([...e.target.files]);
+$("folderInput").onchange = (e) => addFiles([...e.target.files]);
+
+function addFiles(files) {
+  const vids = files.filter(f => f.type.startsWith("video/") || /\.(mp4|mov|avi|mkv|webm|m4v)$/i.test(f.name));
+  vids.forEach(f => queueItems.push({ file: f, status: filenameSet.has(f.name) ? "dup" : "pending", error: null }));
+  renderFileList();
+}
+
+function renderFileList() {
+  const el = $("fileList");
+  el.innerHTML = queueItems.map((it, i) => `
+    <div class="fileRow">
+      <span>${ellipsize(it.file.name)}</span>
+      <span class="st ${it.status}">${
+        {pending:"대기", uploading:"진행중", success:"성공", fail:"실패", dup:"중복"}[it.status]
+      }</span>
+    </div>`).join("");
+  const done = queueItems.filter(i => i.status === "success" || i.status === "dup").length;
+  const fails = queueItems.filter(i => i.status === "fail").length;
+  $("progressBar").style.width = queueItems.length ? `${(done / queueItems.length) * 100}%` : "0%";
+  $("progressText").textContent = queueItems.length ? `${done}/${queueItems.length} 완료 (실패 ${fails})` : "";
+  $("retryFailBtn").style.display = fails ? "block" : "none";
+}
+
+async function uploadOne(item) {
+  item.status = "uploading"; renderFileList();
+  try {
+    const fd = new FormData();
+    fd.append("file", item.file);
+    fd.append("upload_preset", UPLOAD_PRESET);
+    fd.append("use_filename", "true");
+    fd.append("unique_filename", "true");
+    const res = await fetch(`https://api.cloudinary.com/v1_1/${CLOUD_NAME}/video/upload`, { method: "POST", body: fd });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error?.message || "업로드 실패");
+
+    const keywords = tokenize($("uploadKwInput").value).filter(Boolean);
+    const docData = {
+      filename: item.file.name,
+      cloudinaryPublicId: data.public_id,
+      cloudinaryUrl: data.secure_url,
+      thumbnailUrl: thumbUrl(data.public_id),
+      keywords,
+      createdAt: serverTimestamp()
+    };
+    const ref = await addDoc(collection(db, "videos"), docData);
+    videos.unshift({ id: ref.id, ...docData, keywords });
+    filenameSet.add(item.file.name);
+    item.status = "success";
+  } catch (e) {
+    item.status = "fail"; item.error = e.message;
+  }
+  renderFileList();
+}
+
+async function runQueue(items) {
+  const CONCURRENCY = 4;
+  let idx = 0;
+  async function worker() {
+    while (idx < items.length) {
+      const item = items[idx++];
+      if (item.status === "dup") continue;
+      await uploadOne(item);
+    }
+  }
+  await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+  render();
+}
+
+$("startUploadBtn").onclick = () => {
+  const targets = queueItems.filter(i => i.status === "pending");
+  if (!targets.length) return alert("업로드할 파일이 없습니다");
+  runQueue(targets);
+};
+$("retryFailBtn").onclick = () => {
+  const targets = queueItems.filter(i => i.status === "fail");
+  targets.forEach(i => i.status = "pending");
+  runQueue(targets);
+};
+
+// ---------- 검색어 적용 ----------
+$("applyKwBtn").onclick = () => {
+  if (!selected.size) return alert("영상을 선택하세요");
+  $("kwTargetCount").textContent = selected.size;
+  $("kwInput").value = "";
+  renderBundles();
+  $("kwOverlay").classList.add("show");
+};
+$("kwClose").onclick = () => $("kwOverlay").classList.remove("show");
+
+function renderBundles() {
+  $("bundleList").innerHTML = bundles.map(b =>
+    `<span class="bundleChip" data-id="${b.id}">${b.name}</span>`
+  ).join("");
+  [...document.querySelectorAll(".bundleChip")].forEach(chip => {
+    chip.onclick = () => {
+      const b = bundles.find(x => x.id === chip.dataset.id);
+      $("kwInput").value = (b.keywords || []).join(", ");
+    };
+  });
+}
+
+$("saveBundleBtn").onclick = async () => {
+  const name = $("bundleNameInput").value.trim();
+  const keywords = tokenize($("kwInput").value);
+  if (!name || !keywords.length) return alert("이름과 검색어를 입력하세요");
+  const ref = await addDoc(collection(db, "bundles"), { name, keywords });
+  bundles.push({ id: ref.id, name, keywords });
+  $("bundleNameInput").value = "";
+  renderBundles();
+};
+
+$("kwApplyBtn").onclick = async () => {
+  const mode = document.querySelector('input[name="kwMode"]:checked').value;
+  const kws = tokenize($("kwInput").value);
+  if (mode !== "remove" && !kws.length) return alert("검색어를 입력하세요");
+  const batch = writeBatch(db);
+  selected.forEach(id => {
+    const v = videos.find(x => x.id === id);
+    if (!v) return;
+    let newKw;
+    const cur = new Set(v.keywords || []);
+    if (mode === "add") kws.forEach(k => cur.add(k));
+    else if (mode === "overwrite") { cur.clear(); kws.forEach(k => cur.add(k)); }
+    else if (mode === "remove") kws.forEach(k => cur.delete(k));
+    newKw = [...cur];
+    v.keywords = newKw;
+    batch.update(doc(db, "videos", id), { keywords: newKw });
+  });
+  await batch.commit();
+  $("kwOverlay").classList.remove("show");
+  selectMode = false; selected.clear(); updateSelBar(); render();
+};
+
+// ---------- init ----------
+loadVideos();
+loadBundles();
+</script>
+</body>
+</html>

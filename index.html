@@ -105,6 +105,8 @@
   #fileList { max-height:220px; overflow-y:auto; margin-top:8px; }
   #progressWrap { background:#eee; border-radius:6px; overflow:hidden; height:8px; margin-top:10px; }
   #progressBar { background:#1a1a1a; height:100%; width:0%; transition:width .2s; }
+  #statusBar { display:none; width:100%; max-width:900px; margin:8px auto 0; padding:6px 12px; border:1px solid #ddd; border-radius:10px; background:#fff; font-size:12px; text-align:left; cursor:pointer; }
+  #statusBar.err { color:#a31c2b; border-color:#f0c4c9; }
 </style>
 </head>
 <body>
@@ -116,6 +118,7 @@
     <button class="btn secondary" id="selectModeBtn">선택</button>
     <button class="btn" id="uploadOpenBtn">＋ 업로드</button>
   </div>
+  <button id="statusBar"></button>
   <div id="selectBar">
     <span id="selCount">0개 선택</span>
     <button class="btn secondary" id="applyKwBtn">검색어 적용</button>
@@ -169,7 +172,10 @@
 <div class="overlay" id="uploadOverlay">
   <div class="sheet">
     <button class="close" id="uploadClose">✕</button>
-    <h3>영상 업로드</h3>
+    <h3>업로드 관리</h3>
+    <div id="countBox"></div>
+    <div id="progressWrap"><div id="progressBar"></div></div>
+    <div id="progressText" style="font-size:12px;color:#666;margin-top:6px;"></div>
     <div class="row">
       <input type="file" id="fileInput" multiple accept="video/*" style="display:none;">
       <input type="file" id="folderInput" webkitdirectory multiple style="display:none;">
@@ -188,14 +194,15 @@
     <button class="btn secondary" id="retryFailBtn" style="width:100%;margin-top:6px;display:none;">실패한 파일만 재시도</button>
     <button class="btn secondary" id="reconnectBtn" style="width:100%;margin-top:6px;display:none;">이전에 선택한 파일 다시 연결</button>
     <div id="uploadNotice" style="font-size:12px;color:#8a4b00;margin-top:8px;"></div>
-    <div id="progressWrap"><div id="progressBar"></div></div>
-    <div id="progressText" style="font-size:12px;color:#666;margin-top:6px;"></div>
     <div id="diagText" style="font-size:11px;color:#888;margin-top:4px;word-break:break-all;"></div>
     <div id="fileList"></div>
   </div>
 </div>
 
 <div id="toast"></div>
+
+<!-- 파일명 중복 선택 -->
+<div class="overlay" id="dupOverlay" style="z-index:150"><div class="sheet"><h3 id="dupTitle"></h3><div id="dupBody"></div></div></div>
 
 <!-- 검색어 적용 모달 -->
 <div class="overlay" id="kwOverlay">
@@ -279,8 +286,8 @@ let favOnly = false;
 
 const $ = (id) => document.getElementById(id);
 
-function thumbUrl(publicId) {
-  return `https://res.cloudinary.com/${CLOUD_NAME}/video/upload/w_400,h_400,c_fill,so_0/${publicId}.jpg`;
+function thumbUrl(publicId, ver) {
+  return `https://res.cloudinary.com/${CLOUD_NAME}/video/upload/w_400,h_400,c_fill,so_0/${ver ? "v" + ver + "/" : ""}${publicId}.jpg`;
 }
 
 async function loadVideos() {
@@ -418,6 +425,8 @@ const UPLOAD_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_AUTO_RETRY = 2;           // 네트워크 오류/429/5xx 자동 재시도 횟수
 const CLD_ENDPOINT = `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/video/upload`;
 const VIDEO_RE = /\.(mp4|mov|avi|mkv|webm|m4v)$/i;
+const stat = (o) => o.status === "completed" && o.duplicate ? "duplicate" : o.status; // 구버전(completed+duplicate) 호환
+const isDone = (o) => ["completed", "duplicate"].includes(stat(o));
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const esc = (s) => String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
 
@@ -477,7 +486,7 @@ function jobPatch(it) {
     uploadJobId: it.jobId, filename: it.name, fileHash: it.hash || null, status: it.status,
     cloudinaryPublicId: it.publicId || null, cloudinaryUrl: it.url || null, thumbnailUrl: it.thumb || null,
     cloudinaryResourceType: it.resourceType || null,
-    error: it.error || null, duplicate: !!it.duplicate,
+    error: it.error || null, duplicate: !!it.duplicate, dupKind: it.dupKind || null,
     size: it.size, lastModified: it.lastModified, relPath: it.relPath || "",
     keywords: it.keywords || [], updatedAt: serverTimestamp()
   };
@@ -503,8 +512,8 @@ function itemFromJob(jobId, j) {
   return {
     jobId, name: j.filename || "(이름 없음)", size: j.size || 0, lastModified: j.lastModified || 0, relPath: j.relPath || "",
     file: null, handle: null,
-    status: j.status === "uploading" ? "pending" : (j.status || "pending"), // 이전 세션에서 끊긴 uploading은 대기로 복구
-    error: j.error || null, hash: j.fileHash || null, duplicate: !!j.duplicate,
+    status: j.status === "uploading" ? "pending" : (stat(j) || "pending"), // 이전 세션에서 끊긴 uploading은 대기로 복구
+    error: j.error || null, hash: j.fileHash || null, duplicate: !!j.duplicate, dupKind: j.dupKind || null,
     publicId: j.cloudinaryPublicId || null, url: j.cloudinaryUrl || null, thumb: j.thumbnailUrl || null,
     resourceType: j.cloudinaryResourceType || null, keywords: j.keywords || []
   };
@@ -520,11 +529,11 @@ function rebuildHashIndex() {
 async function loadJobs() {
   try {
     const snap = await getDocs(collection(db, "uploadJobs"));
-    jobMap = new Map(); snap.docs.forEach(d => jobMap.set(d.id, d.data()));
+    jobMap = new Map(); snap.docs.forEach(d => { const j = d.data(); if (j.status === "uploading") j.status = "pending"; jobMap.set(d.id, j); }); // 끊긴 uploading은 대기로
     let open = 0;
     [...jobMap.entries()].sort((a, b) => String(a[1].relPath || "").localeCompare(String(b[1].relPath || "")) || String(a[1].filename).localeCompare(String(b[1].filename)))
       .forEach(([id, j]) => {
-        if (j.status !== "completed" && !itemById.has(id)) { const it = itemFromJob(id, j); queueItems.push(it); itemById.set(id, it); open++; }
+        if (!isDone(j) && !itemById.has(id)) { const it = itemFromJob(id, j); queueItems.push(it); itemById.set(id, it); open++; }
       });
     rebuildHashIndex();
     diag(`Firebase 업로드 작업 ${jobMap.size}개 로드 (미완료 ${open}개 복원)`);
@@ -542,13 +551,13 @@ async function addFiles(entries) {
     const jobId = await jobIdFor(e.file, e.relPath || "");
     let it = itemById.get(jobId);
     if (it) {
-      if (!it.file && it.status !== "completed") { it.file = e.file; it.handle = e.handle || null; attached++; } else known++;
+      if (!it.file && !isDone(it)) { it.file = e.file; it.handle = e.handle || null; attached++; } else known++;
       continue;
     }
     const j = jobMap.get(jobId);
     if (j) {
       it = itemFromJob(jobId, j);
-      if (it.status !== "completed") { it.file = e.file; it.handle = e.handle || null; }
+      if (!isDone(it)) { it.file = e.file; it.handle = e.handle || null; }
       known++;
     } else {
       it = { jobId, name: e.file.name, size: e.file.size, lastModified: e.file.lastModified, relPath: e.relPath || "",
@@ -615,7 +624,7 @@ async function walkDir(dirHandle, prefix, out) {
 // 새로고침 후: 저장된 핸들로 파일 재연결 (사용자 클릭 필요, 권한 허용 창이 뜰 수 있음)
 async function reconnectFiles() {
   if (!hasFSA) return alert("이 브라우저는 파일 자동 재연결을 지원하지 않습니다. 같은 파일/폴더를 다시 선택해 주세요.");
-  const need = queueItems.filter(i => !i.file && i.status !== "completed");
+  const need = queueItems.filter(i => !i.file && !isDone(i));
   if (!need.length) return;
   let ok = 0;
   try {
@@ -674,50 +683,61 @@ $("folderInput").onchange = onPicked;
 $("reconnectBtn").onclick = reconnectFiles;
 
 // ----- 화면 -----
-function uiState(it) {
-  if (it.status === "completed") return it.duplicate ? ["dup", "이미 등록됨"] : ["success", "성공"];
-  if (it.status === "uploading") return ["uploading", "진행중"];
-  if (it.status === "failed") return ["fail", it.file ? "실패" : "실패 · 재선택 필요"];
-  if (!it.file) return ["needfile", "다시 파일 선택 필요"];
-  if (it.status === "paused") return ["paused", "중지됨"];
-  return ["pending", "대기"];
+function uiState(j, it) {
+  const s = stat(j);
+  if (s === "completed") return ["success", "완료"];
+  if (s === "duplicate") return ["dup", j.dupKind === "name" ? "중복 · 건너뜀" : "중복"];
+  if (s === "uploading") return ["uploading", "업로드 중"];
+  if (s === "failed") return ["fail", it && !it.file ? "실패 · 재선택 필요" : "실패"];
+  if (s === "paused") return ["paused", "일시정지"];
+  return it && !it.file ? ["needfile", "대기 · 파일 재선택 필요"] : ["pending", "대기"];
 }
-let renderTimer = null;
+const ST_NAMES = { completed: "완료", uploading: "업로드 중", pending: "대기", failed: "실패", paused: "일시정지", duplicate: "중복" };
+let filterSt = "", renderTimer = null;
 function renderFileList() { if (renderTimer) return; renderTimer = setTimeout(() => { renderTimer = null; renderFileListNow(); }, 120); }
 function renderFileListNow() {
-  const c = { completed: 0, uploading: 0, pending: 0, failed: 0, paused: 0, needfile: 0 };
-  const buckets = [[], [], [], []];
-  for (const it of queueItems) {
-    if (it.status === "completed") { c.completed++; buckets[3].push(it); continue; }
-    if (it.status === "uploading") { c.uploading++; buckets[0].push(it); continue; }
-    if (it.status === "failed") { c.failed++; buckets[1].push(it); continue; }
-    if (it.status === "paused") c.paused++; else c.pending++;
-    if (!it.file) c.needfile++;
-    buckets[2].push(it);
-  }
-  const total = queueItems.length;
-  const rows = [].concat(...buckets);
-  $("fileList").innerHTML = rows.slice(0, MAX_ROWS).map(it => {
-    const [cls, label] = uiState(it);
-    return `<div class="fileRow"><div class="nm">${esc(ellipsize(it.name))}${it.error && it.status === "failed" ? `<div class="er">${esc(it.error)}</div>` : ""}</div><span class="st ${cls}">${label}</span></div>`;
-  }).join("") + (rows.length > MAX_ROWS ? `<div class="fileRow"><span>… 외 ${rows.length - MAX_ROWS}개 (진행중·실패 항목이 위에 표시됩니다)</span></div>` : "");
-  const pct = total ? (c.completed / total) * 100 : 0;
+  // 집계는 Firestore uploadJobs(jobMap) 기준 → 모달을 닫거나 새로고침해도 유지
+  const c = { total: jobMap.size, completed: 0, uploading: 0, pending: 0, failed: 0, paused: 0, duplicate: 0 };
+  const rows = [];
+  jobMap.forEach((j, id) => { const s = stat(j); if (s in c) c[s]++; if (!filterSt || filterSt === s) rows.push([id, j, s]); });
+  const ord = { uploading: 0, failed: 1, pending: 2, paused: 2, completed: 3, duplicate: 3 };
+  rows.sort((x, y) => ord[x[2]] - ord[y[2]]);
+  const done = c.completed + c.duplicate, total = c.total, left = c.pending + c.paused;
+  const pct = total ? done / total * 100 : 0, n = Math.round(pct / 10);
+  const label = c.uploading > 0 || runState === "running" ? "업로드 중" : left ? (c.paused ? "업로드 일시정지" : "업로드 대기") : "업로드 완료";
+  const sb = $("statusBar");
+  sb.style.display = total ? "block" : "none";
+  sb.classList.toggle("err", c.failed > 0);
+  sb.textContent = `${label} · ${done.toLocaleString()}/${total.toLocaleString()}` + (c.failed ? ` · 실패 ${c.failed}` : "");
+  $("countBox").innerHTML = [["", "전체", total], ...Object.entries(ST_NAMES).map(([k, nm]) => [k, nm, c[k]])].map(([k, nm, v]) =>
+    `<span class="bundleChip" data-f="${k}" style="${filterSt === k ? "background:#1a1a1a;color:#fff;" : ""}">${nm} ${v.toLocaleString()}</span>`).join("");
+  $("fileList").innerHTML = rows.slice(0, MAX_ROWS).map(([id, j, s]) => {
+    const [cls, lb] = uiState(j, itemById.get(id));
+    return `<div class="fileRow"><div class="nm">${esc(ellipsize(j.filename || "(이름 없음)"))}${s === "failed" && j.error ? `<div class="er">${esc(j.error)}</div>` : ""}</div>` +
+      (s === "failed" ? `<button class="btn secondary" data-retry="${id}" style="padding:2px 8px;font-size:11px;margin-right:6px">재시도</button>` : "") + `<span class="st ${cls}">${lb}</span></div>`;
+  }).join("") + (rows.length > MAX_ROWS ? `<div class="fileRow"><span>… 외 ${rows.length - MAX_ROWS}개 (상태 칩을 눌러 필터링)</span></div>` : "");
   $("progressBar").style.width = pct + "%";
-  const waiting = c.pending + c.paused;
-  $("progressText").textContent = total
-    ? `${c.completed}/${total} 완료 (${pct.toFixed(1)}%)\n${total}개 중 완료 ${c.completed} · 업로드 중 ${c.uploading} · 대기 ${waiting} · 실패 ${c.failed}` + (c.paused ? ` (중지됨 ${c.paused})` : "")
-    : "";
+  $("progressText").textContent = total ? `${"█".repeat(n)}${"░".repeat(10 - n)} ${pct.toFixed(1)}%` : "";
+  const needfile = queueItems.filter(it => (it.status === "pending" || it.status === "paused") && !it.file).length;
   $("retryFailBtn").style.display = c.failed ? "block" : "none";
-  $("reconnectBtn").style.display = c.needfile && hasFSA ? "block" : "none";
+  $("reconnectBtn").style.display = needfile && hasFSA ? "block" : "none";
   let notice = "";
-  if (c.needfile) notice += `새로고침/재접속 전에 끝나지 않은 파일 ${c.needfile}개는 브라우저가 파일 자체를 보관하지 않아 "다시 파일 선택 필요" 상태입니다. ` +
-    (hasFSA ? `위의 "이전에 선택한 파일 다시 연결"을 누르거나, ` : `같은 파일/폴더를 `) + `다시 선택해 주세요. 이미 완료된 파일은 다시 업로드되지 않습니다.`;
+  if (needfile) notice += `새로고침/재접속 전에 끝나지 않은 파일 ${needfile}개는 브라우저가 파일 자체를 보관하지 않아 "다시 파일 선택 필요" 상태입니다. ` +
+    (hasFSA ? `위의 "이전에 선택한 파일 다시 연결"을 누르거나, ` : `같은 파일/폴더를 `) + `다시 선택해 주세요. 이미 완료·중복 처리된 파일은 다시 업로드되지 않습니다.`;
   if (persistErrors) notice += `\n⚠ Firebase 상태 저장 실패 ${persistErrors}건 — 콘솔 확인`;
   $("uploadNotice").textContent = notice;
   $("pauseBtn").disabled = runState !== "running";
   $("resumeBtn").disabled = runState === "running" && c.paused === 0;
   $("stopAllBtn").disabled = runState !== "running" && runState !== "paused";
 }
+$("statusBar").onclick = () => { $("uploadOverlay").classList.add("show"); renderFileListNow(); };
+$("countBox").onclick = (e) => { const k = e.target.dataset.f; if (k === undefined) return; filterSt = k; renderFileListNow(); };
+$("fileList").onclick = async (e) => {
+  const id = e.target.dataset.retry; if (!id) return;
+  const it = itemById.get(id);
+  if (!it || !it.file) return alert("이 파일은 브라우저에 없습니다. 같은 파일을 다시 선택한 뒤 재시도해 주세요.");
+  it.status = "pending"; it.error = null; await persist(it); renderFileList(); begin();
+};
 
 // ----- Cloudinary 업로드 (unsigned, multipart: file + upload_preset) -----
 async function uploadToCloudinary(file) {
@@ -769,12 +789,46 @@ async function uploadAndSave(item) {
   return { jobId: item.jobId, publicId: item.publicId, url: item.url, thumb: item.thumb };
 }
 
+let credAsked = false;
+async function destroyOld(publicId) { // 서명 삭제: API Key/Secret 필요(없으면 1회만 물어봄). 실패해도 새 데이터는 안전
+  if (!localStorage.getItem("cld_api_key") && credAsked) return false;
+  credAsked = true;
+  const { key, secret } = getCldCreds(); if (!key || !secret) return false;
+  const ts = Math.floor(Date.now() / 1000), fd = new FormData();
+  const sig = await sha1Hex(`invalidate=true&public_id=${publicId}&timestamp=${ts}${secret}`);
+  Object.entries({ public_id: publicId, invalidate: "true", timestamp: ts, api_key: key, signature: sig }).forEach(([k, v]) => fd.append(k, v));
+  const r = await fetch(`https://api.cloudinary.com/v1_1/${CLOUD_NAME}/video/destroy`, { method: "POST", body: fd });
+  return (await r.json()).result === "ok";
+}
+// 순서: ① 새 파일 업로드 ② Firebase 갱신 ③ 기존 원본 삭제. ①②가 실패하면 기존 데이터는 그대로다.
+async function overwriteAndSave(item) {
+  const old = videos.find(v => v.id === item.targetId);
+  if (!old) return uploadAndSave(item);
+  if (!item.publicId) {
+    const d = await uploadToCloudinary(item.file);
+    item.publicId = d.public_id; item.url = d.secure_url; item.thumb = thumbUrl(d.public_id, d.version); item.resourceType = d.resource_type || null;
+  }
+  const patch = { cloudinaryPublicId: item.publicId, cloudinaryUrl: item.url, thumbnailUrl: item.thumb,
+    cloudinaryResourceType: item.resourceType, fileHash: item.hash || null, uploadJobId: item.jobId }; // filename·검색어·인물·조합·favorite은 건드리지 않음
+  try { await updateDoc(doc(db, "videos", old.id), { ...patch, updatedAt: serverTimestamp() }); }
+  catch (e) { throw new Error("Firebase 영상 갱신 실패(기존 데이터는 유지됨): " + e.message); }
+  const oldPid = old.cloudinaryPublicId, oldHash = old.fileHash;
+  Object.assign(old, patch);
+  if (oldHash) hashIndex.delete(oldHash);
+  if (item.hash) hashIndex.set(item.hash, { jobId: old.id, publicId: item.publicId, url: item.url, thumb: item.thumb });
+  if (oldPid && oldPid !== item.publicId) { // 프리셋이 같은 public_id로 덮어쓴 경우엔 삭제하지 않음
+    let ok = false; try { ok = await destroyOld(oldPid); } catch (_) {}
+    if (!ok) toast(`기존 원본 삭제 실패(Cloudinary에 남아 있음): ${item.name}`);
+  }
+  return { jobId: old.id, publicId: item.publicId, url: item.url, thumb: item.thumb };
+}
+
 let gridTimer = null;
 function scheduleGridRender() { if (gridTimer) return; gridTimer = setTimeout(() => { gridTimer = null; render(); }, 3000); }
 
 async function processItem(item) {
   try {
-    item.hash = await computeFileHash(item.file);
+    item.hash = item.hash || await computeFileHash(item.file);
     if (!item.hash && !processItem.warned) { processItem.warned = true; diag("이 환경은 crypto.subtle(HTTPS 필요)이 없어 해시 중복 검사를 건너뜁니다", true); }
     let existing = null, waitFor = null, p = null;
     if (item.hash) {
@@ -784,15 +838,15 @@ async function processItem(item) {
     }
     if (!existing && waitFor) { try { existing = await waitFor; } catch (_) { existing = null; } }
     if (!existing) {
-      p = uploadAndSave(item);                       // 검사~등록이 동기 구간이라 같은 hash 동시 업로드 방지
+      p = (item.action === "overwrite" ? overwriteAndSave : uploadAndSave)(item);                       // 검사~등록이 동기 구간이라 같은 hash 동시 업로드 방지
       if (item.hash) inflight.set(item.hash, p);
       try { await p; } finally { if (item.hash && inflight.get(item.hash) === p) inflight.delete(item.hash); }
       item.duplicate = false;
     } else {
-      item.duplicate = true; item.publicId = existing.publicId; item.url = existing.url; item.thumb = existing.thumb;
+      item.duplicate = true; item.dupKind = "hash"; item.publicId = existing.publicId; item.url = existing.url; item.thumb = existing.thumb;
       diag(`이미 등록됨(해시 일치), 업로드 생략: ${item.name}`);
     }
-    item.status = "completed"; item.error = null;
+    item.status = item.duplicate ? "duplicate" : "completed"; item.error = null;
   } catch (e) {
     item.status = "failed"; item.error = e.message || String(e);
     diag(`실패: ${item.name} — ${item.error}`, true);
@@ -803,7 +857,7 @@ async function processItem(item) {
 
 // ----- worker queue -----
 function pickNext() {
-  for (const it of queueItems) if (it.status === "pending" && it.file) return it;
+  for (const it of queueItems) if (it.status === "pending" && it.file && it.checked) return it; // checked = 파일명 중복 확인 완료
   return null;
 }
 async function worker() {
@@ -833,16 +887,71 @@ function startWorkers() {
   renderFileList();
 }
 
+function askDups(list) {
+  return new Promise(res => {
+    const ov = $("dupOverlay"), body = $("dupBody");
+    const fin = (ok) => { ov.classList.remove("show"); if (!ok) list.forEach(c => { c.it.action = null; }); res(ok); };
+    const btn = (k, t, x = "") => `<button class="btn ${x}" data-k="${k}" style="padding:10px 14px">${t}</button>`;
+    const rows = () => {
+      body.innerHTML = list.map((c, i) => `<div class="fileRow" style="flex-wrap:wrap;gap:6px"><div class="nm" style="flex-basis:100%">기존: ${esc(c.old.filename)}<br>새 파일: ${esc((c.it.relPath || "") + c.it.name)} · ${(c.it.size / 1048576).toFixed(1)}MB</div>` +
+        ["overwrite", "skip"].map(a => `<button class="btn ${c.it.action === a ? "" : "secondary"}" data-i="${i}" data-a="${a}" style="padding:6px 12px;font-size:12px">${a === "overwrite" ? "덮어쓰기" : "건너뛰기"}</button>`).join("") + `</div>`).join("") +
+        `<div style="display:flex;gap:6px;margin-top:10px">${list.length > 1 ? `<button class="btn" data-k="ok" style="flex:1" ${list.every(c => c.it.action) ? "" : "disabled"}>확인</button>` : ""}${btn("cancel", "취소", "secondary")}</div>`;
+    };
+    $("dupTitle").textContent = list.length > 1 ? `중복 파일 ${list.length}개 발견` : "동일한 파일명이 이미 존재합니다.";
+    if (list.length > 1) body.innerHTML = `<div style="display:flex;flex-direction:column;gap:6px">${btn("ow", "전체 덮어쓰기")}${btn("sk", "전체 건너뛰기")}${btn("pick", "파일별 선택", "secondary")}${btn("cancel", "취소", "secondary")}</div>`;
+    else rows();
+    body.onclick = (e) => {
+      const b = e.target.closest("button"); if (!b || b.disabled) return;
+      const { k, i, a } = b.dataset;
+      if (a) { list[i].it.action = a; return list.length === 1 ? fin(true) : rows(); }
+      if (k === "ow" || k === "sk") { list.forEach(c => { c.it.action = k === "ow" ? "overwrite" : "skip"; }); fin(true); }
+      else if (k === "pick") rows();
+      else if (k === "ok") fin(true);
+      else if (k === "cancel") fin(false);
+    };
+    ov.classList.add("show"); // 기본 선택값 없음: 사용자가 고를 때까지 action은 null
+  });
+}
+// 등록된 영상과 filename이 같으면 사용자에게 묻는다. 내용(hash)까지 같으면 묻지 않고 hash 중복으로 처리된다.
+async function resolveDups() {
+  const byName = new Map(videos.map(v => [v.filename, v])), list = [];
+  for (const it of queueItems) {
+    if (it.status !== "pending" || !it.file || it.action) continue;
+    const old = byName.get(it.name);
+    if (!old || old.id === it.jobId) continue;
+    it.hash = it.hash || await computeFileHash(it.file);
+    if (it.hash && old.fileHash === it.hash) continue;
+    it.targetId = old.id; list.push({ it, old });
+  }
+  if (list.length && !(await askDups(list))) return false;
+  const sk = list.map(c => c.it).filter(i => i.action === "skip");
+  sk.forEach(i => { i.status = "duplicate"; i.duplicate = true; i.dupKind = "name"; i.error = null; });
+  if (sk.length) await persistMany(sk);   // 건너뛴 파일: 업로드 없이 중복 상태로 기록
+  return true;
+}
+let askBusy = false;
+async function begin() {
+  if (askBusy) return;
+  askBusy = true;
+  try {
+    snapshotKeywords = tokenize($("uploadKwInput").value);
+    await videosReady;
+    if (!(await resolveDups())) return;
+    queueItems.forEach(i => { if (i.status === "pending") i.checked = true; });
+  } finally { askBusy = false; }
+  renderFileList();
+  if (pickNext()) { runState = "running"; startWorkers(); }
+}
+
 $("startUploadBtn").onclick = () => {
   diag("업로드 시작 버튼 클릭");
   const ready = queueItems.filter(i => i.status === "pending" && i.file).length;
   if (!ready) {
     const paused = queueItems.filter(i => i.status === "paused" && i.file).length;
-    const need = queueItems.filter(i => !i.file && i.status !== "completed").length;
+    const need = queueItems.filter(i => !i.file && !isDone(i)).length;
     return alert(paused ? "중지된 파일이 있습니다. [재개]를 눌러 주세요." : need ? "업로드할 파일이 브라우저에 없습니다. 파일을 다시 선택해 주세요." : "업로드할 파일이 없습니다");
   }
-  snapshotKeywords = tokenize($("uploadKwInput").value);
-  runState = "running"; startWorkers();
+  begin();
 };
 $("pauseBtn").onclick = () => {
   if (runState !== "running") return;
@@ -852,8 +961,7 @@ $("resumeBtn").onclick = async () => {
   const paused = queueItems.filter(i => i.status === "paused");
   paused.forEach(i => { i.status = "pending"; });
   if (paused.length) await persistMany(paused);
-  snapshotKeywords = tokenize($("uploadKwInput").value);
-  runState = "running"; diag("재개"); startWorkers();
+  diag("재개"); await begin();
 };
 $("stopAllBtn").onclick = async () => {
   if (runState === "idle") return;
@@ -868,8 +976,7 @@ $("retryFailBtn").onclick = async () => {
   if (!targets.length) return alert("실패한 파일을 다시 업로드하려면 해당 파일을 다시 선택해야 합니다.");
   targets.forEach(i => { i.status = "pending"; i.error = null; });
   await persistMany(targets);
-  snapshotKeywords = tokenize($("uploadKwInput").value);
-  runState = "running"; startWorkers();
+  await begin();
 };
 window.addEventListener("beforeunload", (e) => {
   if (activeWorkers > 0) { e.preventDefault(); e.returnValue = "업로드가 진행 중입니다. 현재 진행 상황은 저장됩니다."; return e.returnValue; }
@@ -933,7 +1040,7 @@ $("kwApplyBtn").onclick = async () => {
 
 // ---------- init ----------
 jobsReady = loadJobs();
-loadVideos().then(() => rebuildHashIndex());
+const videosReady = loadVideos().then(() => rebuildHashIndex());
 loadBundles();
 </script>
 </body>

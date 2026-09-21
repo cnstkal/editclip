@@ -252,21 +252,6 @@ const db = getFirestore(fbApp);
 const CLOUD_NAME = "qm0m5g4o";
 const UPLOAD_PRESET = "editclip"; // Unsigned preset (secret 미사용)
 
-// 삭제(Cloudinary destroy)는 서명이 필요해 API Key/Secret이 있어야 함.
-// 코드에 하드코딩하지 않고 최초 1회 입력받아 브라우저에만 저장한다.
-function getCldCreds() {
-  let key = localStorage.getItem("cld_api_key");
-  let secret = localStorage.getItem("cld_api_secret");
-  if (!key || !secret) {
-    key = prompt("(삭제 기능용) Cloudinary API Key를 입력하세요");
-    secret = prompt("(삭제 기능용) Cloudinary API Secret을 입력하세요");
-    if (key && secret) {
-      localStorage.setItem("cld_api_key", key.trim());
-      localStorage.setItem("cld_api_secret", secret.trim());
-    }
-  }
-  return { key, secret };
-}
 async function sha1Hex(str) {
   const buf = await crypto.subtle.digest("SHA-1", new TextEncoder().encode(str));
   return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
@@ -428,9 +413,9 @@ DETAIL.forEach(([f, tags, input]) => {
 });
 $("favBtn").onclick = async () => { if (!currentDetail) return; await toggleFavorite(currentDetail); renderDetail(); };
 $("deleteBtn").onclick = async () => {
-  const v = currentDetail; if (!v || !confirm(`"${v.filename}" 영상을 삭제할까요?\nCloudinary 원본과 Firebase 데이터가 모두 삭제됩니다.`)) return;
+  const v = currentDetail; if (!v || !confirm(`"${v.filename}" 영상을 삭제할까요?\nFirebase 데이터가 삭제됩니다. (Cloudinary 원본은 API 키가 설정된 경우에만 삭제)`)) return;
   let ok = false; try { ok = v.cloudinaryPublicId ? await destroyOld(v.cloudinaryPublicId) : true; } catch (_) {}
-  if (!ok && !confirm("Cloudinary 원본을 삭제하지 못했습니다(API Key/Secret 확인). 목록에서만 삭제할까요?")) return;
+  if (!ok && !confirm("Cloudinary 원본은 삭제되지 않습니다(API 키 없음 또는 오류). 목록에서만 삭제할까요?")) return;
   try {
     const ids = new Set([v.id, v.uploadJobId].filter(Boolean));
     await deleteDoc(doc(db, "videos", v.id));
@@ -834,11 +819,9 @@ async function uploadAndSave(item) {
   return { jobId: item.jobId, publicId: item.publicId, url: item.url, thumb: item.thumb };
 }
 
-let credAsked = false;
-async function destroyOld(publicId) { // 서명 삭제: API Key/Secret 필요(없으면 1회만 물어봄). 실패해도 새 데이터는 안전
-  if (!localStorage.getItem("cld_api_key") && credAsked) return false;
-  credAsked = true;
-  const { key, secret } = getCldCreds(); if (!key || !secret) return false;
+async function destroyOld(publicId) { // 서명 삭제: 브라우저에 API Key/Secret이 저장돼 있을 때만 동작(선택 사항)
+  const key = localStorage.getItem("cld_api_key"), secret = localStorage.getItem("cld_api_secret");
+  if (!key || !secret) return null; // API 키 없음: 입력창 없이 건너뜀 (기존 원본은 Cloudinary에 남음)
   const ts = Math.floor(Date.now() / 1000), fd = new FormData();
   const sig = await sha1Hex(`invalidate=true&public_id=${publicId}&timestamp=${ts}${secret}`);
   Object.entries({ public_id: publicId, invalidate: "true", timestamp: ts, api_key: key, signature: sig }).forEach(([k, v]) => fd.append(k, v));
@@ -863,7 +846,7 @@ async function overwriteAndSave(item) {
   if (item.hash) hashIndex.set(item.hash, { jobId: old.id, publicId: item.publicId, url: item.url, thumb: item.thumb });
   if (oldPid && oldPid !== item.publicId) { // 프리셋이 같은 public_id로 덮어쓴 경우엔 삭제하지 않음
     let ok = false; try { ok = await destroyOld(oldPid); } catch (_) {}
-    if (!ok) toast(`기존 원본 삭제 실패(Cloudinary에 남아 있음): ${item.name}`);
+    if (ok === false) toast(`기존 원본 삭제 실패(Cloudinary에 남아 있음): ${item.name}`);
   }
   return { jobId: old.id, publicId: item.publicId, url: item.url, thumb: item.thumb };
 }

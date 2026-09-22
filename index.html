@@ -484,45 +484,65 @@ let pendingRange = false;      // 모바일: 길게 눌러 시작점이 지정�
 let suppressClick = false;
 let pruneNext = false;
 
+const GRID_PAGE_SIZE = 120;
+let renderedCount = 0;
+let gridAppendBusy = false;
+
+function makeCard(v) {
+  const card = document.createElement("div");
+  card.className = "card" + (selectMode && selected.has(v.id) ? " sel" : "") + (selectMode && v.id === rangeAnchorId ? " anchor" : "");
+  card.draggable = false;
+  card.innerHTML = `
+    <img loading="lazy" src="${getThumb(v)}" alt="" draggable="false">
+    <button class="star" data-id="${v.id}">${v.favorite ? "★" : "☆"}</button>
+    <div class="fn">${ellipsize(v.filename)}</div>
+    <div class="chk ${selected.has(v.id) ? 'on' : ''}"></div>
+  `;
+  const thumb = card.querySelector("img");
+  thumb.onerror = () => {
+    if (thumb.dataset.fallback === "1" || !v.cloudinaryPublicId) return;
+    thumb.dataset.fallback = "1";
+    thumb.src = getThumbFallback(v);
+  };
+  card.querySelector(".star").onclick = (e) => { e.stopPropagation(); toggleFavorite(v); };
+  card.onclick = (e) => onCardClick(v, e);
+  attachLongPress(card, v);
+  cardEls.set(v.id, card);
+  return card;
+}
+
+function appendGridPage() {
+  if (gridAppendBusy || renderedCount >= visibleList.length) return;
+  gridAppendBusy = true;
+  const next = Math.min(renderedCount + GRID_PAGE_SIZE, visibleList.length);
+  const frag = document.createDocumentFragment();
+  for (let i = renderedCount; i < next; i++) frag.appendChild(makeCard(visibleList[i]));
+  $("grid").appendChild(frag);
+  renderedCount = next;
+  gridAppendBusy = false;
+}
+
 function render() {
   const q = $("searchInput").value;
   let list = search(q);
   if (favOnly) list = list.filter(v => v.favorite);
   if (noKwOnly) list = list.filter(v => !hasKeywords(v));
   visibleList = list;
-  if (pruneNext) { // 필터를 바꿨을 때 화면에서 사라진 영상이 선택에 남아 있지 않도록 정리
+  if (pruneNext) {
     pruneNext = false;
     const vis = new Set(list.map(v => v.id));
     [...selected].forEach(id => { if (!vis.has(id)) selected.delete(id); });
     if (rangeAnchorId && !vis.has(rangeAnchorId)) { rangeAnchorId = null; pendingRange = false; }
     updateSelBar();
   }
+
   cardEls = new Map();
-  const frag = document.createDocumentFragment();
-  list.forEach(v => {
-    const card = document.createElement("div");
-    card.className = "card" + (selectMode && selected.has(v.id) ? " sel" : "") + (selectMode && v.id === rangeAnchorId ? " anchor" : "");
-    card.draggable = false;
-    card.innerHTML = `
-      <img loading="lazy" src="${getThumb(v)}" alt="" draggable="false">
-      <button class="star" data-id="${v.id}">${v.favorite ? "★" : "☆"}</button>
-      <div class="fn">${ellipsize(v.filename)}</div>
-      <div class="chk ${selected.has(v.id) ? 'on' : ''}"></div>
-    `;
-    const thumb = card.querySelector("img");
-    thumb.onerror = () => {
-      if (thumb.dataset.fallback === "1" || !v.cloudinaryPublicId) return;
-      thumb.dataset.fallback = "1";
-      thumb.src = getThumbFallback(v);
-    };
-    card.querySelector(".star").onclick = (e) => { e.stopPropagation(); toggleFavorite(v); };
-    card.onclick = (e) => onCardClick(v, e);
-    attachLongPress(card, v);
-    cardEls.set(v.id, card);
-    frag.appendChild(card);
-  });
-  $("grid").classList.toggle("selecting", selectMode);
-  $("grid").replaceChildren(frag);
+  renderedCount = 0;
+  gridAppendBusy = false;
+  const grid = $("grid");
+  grid.replaceChildren();
+  appendGridPage();
+
   const empty = $("emptyMsg");
   empty.textContent = (noKwOnly && !list.length) ? "검색어가 없는 영상이 없습니다" : "결과가 없습니다";
   empty.style.display = list.length ? "none" : "block";
@@ -614,6 +634,13 @@ function updateSelBar() {
   $("selCount").textContent = `${selected.size.toLocaleString()}개 선택됨`;
   $("grid").classList.toggle("selecting", selectMode);
 }
+
+function maybeAppendGrid() {
+  if (window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 900) {
+    appendGridPage();
+  }
+}
+window.addEventListener("scroll", maybeAppendGrid, { passive: true });
 
 let searchRenderTimer = null;
 $("searchInput").addEventListener("input", () => {

@@ -1045,7 +1045,7 @@ function renderFileListNow() {
       (s === "failed" ? `<button class="btn secondary" data-retry="${id}" style="padding:2px 8px;font-size:11px;margin-right:6px">재시도</button>` : "") + `<span class="st ${cls}">${lb}</span></div>`;
   }).join("") + (rows.length > MAX_ROWS ? `<div class="fileRow"><span>… 외 ${rows.length - MAX_ROWS}개 (상태 칩을 눌러 필터링)</span></div>` : "");
   $("progressBar").style.width = pct + "%";
-  $("progressText").textContent = total ? `${"█".repeat(n)}${"░".repeat(10 - n)} ${pct.toFixed(1)}%` : "";
+  $("progressText").textContent = "";
   const needfile = queueItems.filter(it => (it.status === "pending" || it.status === "paused") && !it.file).length;
   $("retryFailBtn").style.display = c.failed ? "block" : "none";
   $("reconnectBtn").style.display = needfile && hasFSA ? "block" : "none";

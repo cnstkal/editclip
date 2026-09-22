@@ -1056,7 +1056,7 @@ function renderFileListNow() {
   $("uploadNotice").textContent = notice;
   $("pauseBtn").disabled = runState !== "running";
   $("resumeBtn").disabled = runState === "running" && c.paused === 0;
-  $("stopAllBtn").disabled = runState !== "running" && runState !== "paused";
+  $("stopAllBtn").disabled = false;
 }
 $("statusBar").onclick = () => { $("uploadOverlay").classList.add("show"); renderFileListNow(); };
 $("countBox").onclick = (e) => { const k = e.target.dataset.f; if (k === undefined) return; filterSt = k; renderFileListNow(); };
@@ -1306,7 +1306,8 @@ $("resumeBtn").onclick = async () => {
   diag("재개"); await begin();
 };
 $("stopAllBtn").onclick = async () => {
-  if (runState === "idle" && activeUploadControllers.size === 0) return;
+  // 이 버튼은 언제든 사용할 수 있으며, 완료된 영상만 남기고
+  // 업로드 작업 목록의 미완료/실패 항목을 한 번에 제거한다.
   runState = "stopped";
 
   const active = [...activeUploadControllers.values()];
@@ -1315,15 +1316,35 @@ $("stopAllBtn").onclick = async () => {
     try { ctx.controller?.abort(); } catch (_) {}
   });
 
-  const targets = queueItems.filter(i => i.status === "pending" || i.status === "uploading");
-  targets.forEach(i => {
-    i.status = "paused";
-    i.error = "전체 취소됨";
-  });
-  if (targets.length) await persistMany(targets);
+  const targets = queueItems.filter(i =>
+    ["pending", "uploading", "paused", "failed"].includes(i.status)
+  );
+  const ids = [...new Set(targets.map(i => i.jobId).filter(Boolean))];
 
-  diag(`전체 취소: 현재 업로드/대기 ${targets.length}개 취소`);
-  toast(`전체 업로드를 취소했습니다 (${active.length}개 진행 중 요청 중단)`);
+  // 화면과 메모리에서 먼저 제거해 즉시 사라지게 한다.
+  targets.forEach(i => itemById.delete(i.jobId));
+  queueItems = queueItems.filter(i => !ids.includes(i.jobId));
+  ids.forEach(id => jobMap.delete(id));
+
+  // Firestore의 uploadJobs에서도 실제로 삭제한다.
+  for (let i = 0; i < ids.length; i += 400) {
+    try {
+      const batch = writeBatch(db);
+      ids.slice(i, i + 400).forEach(id => {
+        batch.delete(doc(db, "uploadJobs", id));
+      });
+      await batch.commit();
+    } catch (e) {
+      persistErrors++;
+      diag(`전체 업로드 취소 후 작업 기록 삭제 실패: ${e.message}`, true);
+    }
+  }
+
+  activeUploadControllers.clear();
+  activeWorkers = 0;
+  runState = "idle";
+  diag(`전체 취소/정리 완료: ${ids.length}개 작업 삭제`);
+  toast(ids.length ? `업로드 취소 + 실패/대기 파일 ${ids.length}개 삭제` : "삭제할 업로드 작업이 없습니다");
   renderFileList();
 };
 $("retryFailBtn").onclick = async () => {

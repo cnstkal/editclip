@@ -481,10 +481,10 @@ function normalizeSearchText(s) {
   return String(s ?? "")
     .normalize("NFKC")
     .toLowerCase()
-    .replace(/[\\u200b-\\u200d\\ufeff]/g, "")
-    .replace(/[._/\\-]+/g, " ")
-    .replace(/[^\\p{L}\\p{N}+]+/gu, " ")
-    .replace(/\\s+/g, " ")
+    .replace(/[\u200b-\u200d\ufeff]/g, "")
+    .replace(/[._/\-]+/g, " ")
+    .replace(/[^\p{L}\p{N}+]+/gu, " ")
+    .replace(/\s+/g, " ")
     .trim();
 }
 
@@ -518,8 +518,8 @@ function search(q) {
         else if (t.includes(k) && k.length >= 2) best = Math.max(best, 45);
 
         // 띄어쓰기 유무 차이도 허용: "정 윤호" ↔ "정윤호"
-        const compactK = k.replace(/\\s/g, "");
-        const compactT = t.replace(/\\s/g, "");
+        const compactK = k.replace(/\s/g, "");
+        const compactT = t.replace(/\s/g, "");
         if (compactK === compactT) best = Math.max(best, 95);
         else if (compactK.includes(compactT) || compactT.includes(compactK)) best = Math.max(best, 60);
       });
@@ -536,7 +536,7 @@ function search(q) {
           const chars = [...t];
           let found = 0;
           fields.forEach(k => {
-            const compactK = k.replace(/\\s/g, "");
+            const compactK = k.replace(/\s/g, "");
             found = Math.max(found, chars.filter(ch => compactK.includes(ch)).length / chars.length);
           });
           if (found >= 0.7) {

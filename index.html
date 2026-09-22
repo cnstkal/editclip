@@ -389,7 +389,7 @@ function getThumb(v) {
       "/video/upload/",
       "/video/upload/so_0,f_jpg/"
     );
-    return addThumbBust(raw.replace(/.[^./?]+(?=?|$)/, ".jpg"), v);
+    return addThumbBust(raw.replace(/\.[^./?]+(?=\?|$)/, ".jpg"), v);
   }
   return addThumbBust(v.thumbnailUrl || thumbUrl(v.cloudinaryPublicId, v.cloudinaryVersion), v);
 }
@@ -399,7 +399,7 @@ function getThumbFallback(v) {
       "/video/upload/",
       "/video/upload/w_400,h_400,c_fill,so_0,f_jpg/"
     );
-    return addThumbBust(raw.replace(/.[^./?]+(?=?|$)/, ".jpg"), v);
+    return addThumbBust(raw.replace(/\.[^./?]+(?=\?|$)/, ".jpg"), v);
   }
   return addThumbBust(thumbFallbackUrl(v.cloudinaryPublicId, v.cloudinaryVersion), v);
 }

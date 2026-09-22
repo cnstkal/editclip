@@ -198,7 +198,7 @@
   </div>
   <div id="filterBar">
     <button class="btn secondary" id="noKwBtn" aria-pressed="false">검색어 없는 것만</button>
-    <span id="filterInfo"></span>
+    <span id="filterInfo"></span><select id="sortMode" style="padding:8px 10px;border:1px solid #ddd;border-radius:8px;background:#fff;font-size:13px;"><option value="default">기본순</option><option value="similar">🖼️ 비슷한 썸네일끼리</option></select>
   </div>
   <button id="statusBar"></button>
   <div id="selectBar">
@@ -522,11 +522,82 @@ function appendGridPage() {
   gridAppendBusy = false;
 }
 
-function render() {
+let sortMode = "default";
+let similarityBusy = false;
+const similarityCache = new Map();
+
+function thumbSimilaritySignature(v) {
+  return new Promise(resolve => {
+    const url = getThumb(v);
+    if (!url) return resolve(null);
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      try {
+        const size = 16, canvas = document.createElement("canvas");
+        canvas.width = size; canvas.height = size;
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        ctx.drawImage(img, 0, 0, size, size);
+        const d = ctx.getImageData(0, 0, size, size).data;
+        const gray = [];
+        for (let i = 0; i < d.length; i += 4) gray.push((d[i] * 299 + d[i+1] * 587 + d[i+2] * 114) / 1000);
+        const avg = gray.reduce((a,b)=>a+b,0) / gray.length;
+        let bits = "";
+        gray.forEach(x => bits += x >= avg ? "1" : "0");
+        resolve(bits);
+      } catch (_) { resolve(null); }
+    };
+    img.onerror = () => resolve(null);
+    img.src = url;
+  });
+}
+
+function sigDistance(a, b) {
+  if (!a || !b) return 999;
+  let n = 0;
+  for (let i = 0; i < Math.min(a.length,b.length); i++) if (a[i] !== b[i]) n++;
+  return n;
+}
+
+async function sortByVisualSimilarity(list) {
+  if (list.length < 2) return list;
+  const pending = list.filter(v => !similarityCache.has(v.id));
+  let done = 0;
+  for (let i = 0; i < pending.length; i += 8) {
+    const chunk = pending.slice(i, i + 8);
+    const sigs = await Promise.all(chunk.map(async v => [v.id, await thumbSimilaritySignature(v)]));
+    sigs.forEach(([id,s]) => similarityCache.set(id,s));
+    done += chunk.length;
+    if (done % 80 === 0) diag(`썸네일 분석 중… ${done}/${pending.length}`);
+    await new Promise(r => setTimeout(r, 0));
+  }
+  const remaining = list.slice();
+  const result = [];
+  let current = remaining.shift();
+  result.push(current);
+  while (remaining.length) {
+    const cs = similarityCache.get(current.id);
+    let best = 0, bestD = Infinity;
+    for (let i = 0; i < remaining.length; i++) {
+      const d = sigDistance(cs, similarityCache.get(remaining[i].id));
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    current = remaining.splice(best,1)[0];
+    result.push(current);
+  }
+  return result;
+}
+
+async function render() {
   const q = $("searchInput").value;
   let list = search(q);
   if (favOnly) list = list.filter(v => v.favorite);
   if (noKwOnly) list = list.filter(v => !hasKeywords(v));
+  if (sortMode === "similar" && !similarityBusy) {
+    similarityBusy = true;
+    try { list = await sortByVisualSimilarity(list); }
+    finally { similarityBusy = false; }
+  }
   visibleList = list;
   if (pruneNext) {
     pruneNext = false;
@@ -642,6 +713,10 @@ function maybeAppendGrid() {
 }
 window.addEventListener("scroll", maybeAppendGrid, { passive: true });
 
+$("sortMode").onchange = () => {
+  sortMode = $("sortMode").value;
+  render();
+};
 let searchRenderTimer = null;
 $("searchInput").addEventListener("input", () => {
   clearTimeout(searchRenderTimer);

@@ -54,6 +54,9 @@
   .card {
     cursor:pointer; position:relative; background:#fff; border-radius:10px; overflow:hidden;
     border:1px solid #eee;
+    content-visibility:auto;
+    contain:layout paint style;
+    contain-intrinsic-size:0 360px;
   }
   .card img { width:100%; aspect-ratio:1/1; object-fit:cover; display:block; background:#eee; }
   .card .fn { font-size:12px; padding:6px 6px; color:#444; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -612,7 +615,11 @@ function updateSelBar() {
   $("grid").classList.toggle("selecting", selectMode);
 }
 
-$("searchInput").addEventListener("input", render);
+let searchRenderTimer = null;
+$("searchInput").addEventListener("input", () => {
+  clearTimeout(searchRenderTimer);
+  searchRenderTimer = setTimeout(render, 100);
+});
 
 $("favFilterBtn").onclick = () => {
   favOnly = !favOnly; pruneNext = true;
@@ -1219,7 +1226,7 @@ async function overwriteAndSave(item) {
 }
 
 let gridTimer = null;
-function scheduleGridRender() { if (gridTimer) return; gridTimer = setTimeout(() => { gridTimer = null; render(); }, 3000); }
+function scheduleGridRender() { if (gridTimer) return; gridTimer = setTimeout(() => { gridTimer = null; render(); }, 10000); }
 
 async function processItem(item) {
   try {

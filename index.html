@@ -269,6 +269,7 @@
       <button class="btn secondary" id="pauseBtn" style="flex:1;padding:10px 6px;">일시정지</button>
       <button class="btn secondary" id="resumeBtn" style="flex:1;padding:10px 6px;">재개</button>
     </div>
+    <div class="upload-mode" style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:13px;">업로드 방식 <select id="uploadModeSelect" style="flex:1;padding:8px;"><option value="optimized">최적화 업로드</option><option value="ordered">순서대로 업로드</option></select></div>
     <button class="btn" id="stopAllBtn" style="width:100%;margin-top:8px;padding:13px 10px;background:#b42318;">⛔ 전체 업로드 취소</button>
     <button class="btn secondary" id="retryFailBtn" style="width:100%;margin-top:6px;display:none;">실패한 파일만 재시도</button>
     <button class="btn secondary" id="reconnectBtn" style="width:100%;margin-top:6px;display:none;">이전에 선택한 파일 다시 연결</button>
@@ -728,12 +729,14 @@ $("downloadBtn").onclick = () => {
 // ---------- 업로드 ----------
 // 구조: 업로드 큐와 진행 상태는 브라우저 메모리에서만 관리한다.
 // 실행 중인 JS는 페이지가 닫히면 종료된다. 백그라운드 업로드는 하지 않고, 앱을 다시 열면 남은 작업을 이어받는다.
-const CONCURRENCY = 1;              // 선택한 순서대로 한 번에 하나씩 업로드
-const HASH_PARALLEL = 1;             // 순차 업로드에 맞춰 해시 계산도 한 번에 하나씩 처리
+const CONCURRENCY = 10;             // 최적화 업로드 모드 기본값
+const HASH_PARALLEL = 2;             // 최적화 모드에서 해시 계산 동시 처리
 const MAX_ROWS = 300;               // 목록에 그리는 최대 행 수 (성능)
 const FULL_HASH_LIMIT = 50 * 1024 * 1024; // 이 크기 이하는 전체 SHA-256, 초과는 표본 해시
 const UPLOAD_TIMEOUT_MS = 30 * 60 * 1000;
-const MAX_AUTO_RETRY = 2;           // 네트워크 오류/429/5xx 자동 재시도 횟수
+const MAX_AUTO_RETRY = 2;
+const UPLOAD_MODE_KEY = "editclip_upload_mode";
+let uploadMode = localStorage.getItem(UPLOAD_MODE_KEY) || "optimized";           // 네트워크 오류/429/5xx 자동 재시도 횟수
 const CLD_ENDPOINT = `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/video/upload`;
 const VIDEO_RE = /\.(mp4|mov|avi|mkv|webm|m4v)$/i;
 const stat = (o) => o.status === "completed" && o.duplicate ? "duplicate" : o.status; // 구버전(completed+duplicate) 호환
@@ -1257,8 +1260,19 @@ async function worker() {
     }
   }
 }
+function applyUploadMode() {
+  const sel = document.getElementById("uploadModeSelect");
+  if (!sel) return;
+  sel.value = uploadMode;
+  sel.onchange = () => {
+    uploadMode = sel.value;
+    localStorage.setItem(UPLOAD_MODE_KEY, uploadMode);
+    diag(uploadMode === "ordered" ? "순서대로 업로드 모드" : "최적화 업로드 모드");
+  };
+}
 function startWorkers() {
-  while (activeWorkers < CONCURRENCY && runState === "running" && pickNext()) {
+  const workerLimit = uploadMode === "ordered" ? 1 : CONCURRENCY;
+  while (activeWorkers < workerLimit && runState === "running" && pickNext()) {
     activeWorkers++; worker();   // worker는 첫 await 전에 항목을 uploading으로 바꾼다
   }
   renderFileList();
@@ -1434,6 +1448,7 @@ $("kwApplyBtn").onclick = async () => {
 // ---------- init ----------
 // 화면 이벤트는 위에서 모두 연결한 뒤, 데이터 로딩은 각각 실패를 흡수한다.
 // 한 컬렉션(Firebase 작업 목록 등)이 실패해도 검색/선택/모달 같은 UI가 죽지 않는다.
+applyUploadMode();
 firebaseReady.then(() => {
   // uploadJobs는 더 이상 로드하지 않는다. 업로드 큐는 현재 브라우저 세션에서만 유지한다.
   const videosReady = loadVideos()

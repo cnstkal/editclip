@@ -313,11 +313,9 @@
 </div>
 
 <script type="module">
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import {
-  getFirestore, collection, getDocs, addDoc, updateDoc, setDoc, deleteDoc, doc,
-  serverTimestamp, query, orderBy, writeBatch
-} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+let initializeApp, getFirestore, collection, getDocs, addDoc, updateDoc, setDoc, deleteDoc, doc;
+let serverTimestamp, query, orderBy, writeBatch;
+let db = null;
 
 const firebaseConfig = {
   apiKey: "AIzaSyBtovIReWBTVBifTFdDzSV5pqAvYtgiaM8",
@@ -327,8 +325,20 @@ const firebaseConfig = {
   messagingSenderId: "1059739626015",
   appId: "1:1059739626015:web:44313cffbc7b39b4e9c32a"
 };
-const fbApp = initializeApp(firebaseConfig);
-const db = getFirestore(fbApp);
+
+// Firebase는 UI 이벤트 연결을 막지 않도록 비동기 로딩한다.
+const firebaseReady = Promise.all([
+  import("https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js"),
+  import("https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js")
+]).then(([appMod, fsMod]) => {
+  ({ initializeApp } = appMod);
+  ({ getFirestore, collection, getDocs, addDoc, updateDoc, setDoc, deleteDoc, doc,
+     serverTimestamp, query, orderBy, writeBatch } = fsMod);
+  const fbApp = initializeApp(firebaseConfig);
+  db = getFirestore(fbApp);
+}).catch(e => {
+  reportFirebaseError("Firebase 연결 실패", e);
+});
 
 // Firestore 로딩 실패가 있어도 UI 이벤트는 계속 연결되도록 초기화 오류를 비동기에서 처리한다.
 let firebaseBootError = null;
@@ -1402,17 +1412,19 @@ $("kwApplyBtn").onclick = async () => {
 // ---------- init ----------
 // 화면 이벤트는 위에서 모두 연결한 뒤, 데이터 로딩은 각각 실패를 흡수한다.
 // 한 컬렉션(Firebase 작업 목록 등)이 실패해도 검색/선택/모달 같은 UI가 죽지 않는다.
-jobsReady = loadJobs().catch(e => { reportFirebaseError("업로드 작업 로드 실패", e); });
-const videosReady = loadVideos()
-  .catch(e => {
-    reportFirebaseError("영상 목록 로드 실패", e);
-    videos = [];
-    filenameSet = new Set();
-    hashSet = new Set();
-    render();
-  })
-  .then(() => rebuildHashIndex());
-loadBundles().catch(e => reportFirebaseError("검색어 묶음 로드 실패", e));
+firebaseReady.then(() => {
+  jobsReady = loadJobs().catch(e => { reportFirebaseError("업로드 작업 로드 실패", e); });
+  const videosReady = loadVideos()
+    .catch(e => {
+      reportFirebaseError("영상 목록 로드 실패", e);
+      videos = [];
+      filenameSet = new Set();
+      hashSet = new Set();
+      render();
+    })
+    .then(() => rebuildHashIndex());
+  loadBundles().catch(e => reportFirebaseError("검색어 묶음 로드 실패", e));
+});
 </script>
 </body>
 </html>

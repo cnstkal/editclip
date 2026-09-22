@@ -681,11 +681,10 @@ $("favBtn").onclick = async () => { if (!currentDetail) return; await toggleFavo
 $("deleteBtn").onclick = async () => {
   const v = currentDetail; if (!v || !confirm(`"${v.filename}" 영상을 목록에서 삭제할까요?\n(앱/Firebase 목록에서만 삭제되며 Cloudinary 원본은 그대로 유지됩니다)`)) return;
   try {
-    const ids = new Set([v.id, v.uploadJobId].filter(Boolean));
     await deleteDoc(doc(db, "videos", v.id));
-    for (const id of ids) await deleteDoc(doc(db, "uploadJobs", id)); // 같은 파일을 다시 올릴 수 있도록 작업 기록도 삭제
-    ids.forEach(id => { jobMap.delete(id); itemById.delete(id); });
-    queueItems = queueItems.filter(i => !ids.has(i.jobId));
+    jobMap.delete(v.id);
+    itemById.delete(v.id);
+    queueItems = queueItems.filter(i => i.jobId !== v.id);
   } catch (e) { return alert("삭제 실패: " + e.message); }
   videos = videos.filter(x => x.id !== v.id); selected.delete(v.id);
   rebuildHashIndex(); currentDetail = null;
@@ -727,7 +726,7 @@ $("downloadBtn").onclick = () => {
 };
 
 // ---------- 업로드 ----------
-// 구조: Firestore `uploadJobs` 컬렉션에 파일별 작업 상태를 저장(pending/uploading/completed/failed/paused).
+// 구조: 업로드 큐와 진행 상태는 브라우저 메모리에서만 관리한다.
 // 실행 중인 JS는 페이지가 닫히면 종료된다. 백그라운드 업로드는 하지 않고, 앱을 다시 열면 남은 작업을 이어받는다.
 const CONCURRENCY = 10;             // 동시 업로드 최대 개수
 const HASH_PARALLEL = 2;            // 해시 계산(파일을 메모리에 읽음) 동시 개수 제한 — 동시 10개여도 메모리 급증 방지
@@ -744,13 +743,13 @@ const esc = (s) => String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;", "<":"&lt;"
 
 let queueItems = [];        // 업로드 화면에 보이는 항목 (미완료 작업 + 이번에 선택한 파일)
 let itemById = new Map();
-let jobMap = new Map();     // Firestore uploadJobs 전체 (완료 이력 포함)
+let jobMap = new Map();     // 현재 브라우저 세션의 업로드 작업
 let hashIndex = new Map();  // fileHash -> 이미 등록된 영상 정보
 const inflight = new Map(); // fileHash -> 업로드 중인 Promise (같은 배치 내 중복 방지)
 let runState = "idle";      // idle | running | paused | stopped
 let activeWorkers = 0;
 const activeUploadControllers = new Map(); // file -> { controller, cancelled }
-let jobsReady = Promise.resolve();
+let jobsReady = Promise.resolve(); // 호환용: 더 이상 Firestore를 읽지 않음
 let persistErrors = 0;
 let snapshotKeywords = [];
 
@@ -805,7 +804,9 @@ async function computeFileHash(file) {
   return "s:" + await sha256Hex(buf);
 }
 
-// ----- Firestore 영속화 -----
+// ----- 업로드 작업 상태: 브라우저 메모리에서만 관리 -----
+// Firestore의 uploadJobs 컬렉션은 더 이상 읽거나 쓰지 않는다.
+// 실제 영상 데이터는 Cloudinary에 업로드하고, 완료된 영상의 메타데이터만 videos에 1회 저장한다.
 function jobPatch(it) {
   return {
     uploadJobId: it.jobId, filename: it.name, fileHash: it.hash || null, status: it.status,
@@ -813,31 +814,24 @@ function jobPatch(it) {
     cloudinaryResourceType: it.resourceType || null,
     error: it.error || null, duplicate: !!it.duplicate, dupKind: it.dupKind || null,
     size: it.size, lastModified: it.lastModified, relPath: it.relPath || "",
-    keywords: it.keywords || [], updatedAt: serverTimestamp()
+    keywords: it.keywords || [], updatedAt: Date.now()
   };
 }
-function noteJob(it) { jobMap.set(it.jobId, { ...jobPatch(it), updatedAt: Date.now() }); }
+function noteJob(it) {
+  jobMap.set(it.jobId, { ...jobPatch(it) });
+}
+// 업로드 상태는 Firestore에 저장하지 않는다. 페이지를 닫으면 현재 업로드 큐는 사라진다.
 async function persist(it) {
   noteJob(it);
-  try { await setDoc(doc(db, "uploadJobs", it.jobId), jobPatch(it), { merge: true }); }
-  catch (e) { persistErrors++; diag(`Firebase 작업 상태 저장 실패(${it.name}): ${e.message}`, true); }
 }
-async function persistMany(items, extra) {
+async function persistMany(items) {
   items.forEach(noteJob);
-  for (let i = 0; i < items.length; i += 400) {
-    try {
-      const batch = writeBatch(db);
-      items.slice(i, i + 400).forEach(it => batch.set(doc(db, "uploadJobs", it.jobId), { ...jobPatch(it), ...(extra || {}) }, { merge: true }));
-      await batch.commit();
-    } catch (e) { persistErrors++; diag(`Firebase 작업 일괄 저장 실패: ${e.message}`, true); }
-  }
 }
-
 function itemFromJob(jobId, j) {
   return {
     jobId, name: j.filename || "(이름 없음)", size: j.size || 0, lastModified: j.lastModified || 0, relPath: j.relPath || "",
     file: null, handle: null,
-    status: j.status === "uploading" ? "pending" : (stat(j) || "pending"), // 이전 세션에서 끊긴 uploading은 대기로 복구
+    status: j.status === "uploading" ? "pending" : (stat(j) || "pending"),
     error: j.error || null, hash: j.fileHash || null, duplicate: !!j.duplicate, dupKind: j.dupKind || null,
     publicId: j.cloudinaryPublicId || null, url: j.cloudinaryUrl || null, thumb: j.thumbnailUrl || null,
     resourceType: j.cloudinaryResourceType || null, keywords: j.keywords || []
@@ -845,70 +839,75 @@ function itemFromJob(jobId, j) {
 }
 function rebuildHashIndex() {
   hashIndex = new Map();
-  videos.forEach(v => { if (v.fileHash) hashIndex.set(v.fileHash, { jobId: v.uploadJobId || v.id, publicId: v.cloudinaryPublicId, url: v.cloudinaryUrl, thumb: v.thumbnailUrl }); });
-  jobMap.forEach((j, id) => {
-    if (j.status === "completed" && j.fileHash && !j.duplicate && !hashIndex.has(j.fileHash))
-      hashIndex.set(j.fileHash, { jobId: id, publicId: j.cloudinaryPublicId, url: j.cloudinaryUrl, thumb: j.thumbnailUrl });
+  videos.forEach(v => {
+    if (v.fileHash) hashIndex.set(v.fileHash, {
+      jobId: v.uploadJobId || v.id, publicId: v.cloudinaryPublicId, url: v.cloudinaryUrl, thumb: v.thumbnailUrl
+    });
   });
 }
+// 예전 uploadJobs 데이터는 삭제하지 않고 그대로 둔다. 다만 이제 앱에서는 읽지 않는다.
 async function loadJobs() {
-  try {
-    const snap = await getDocs(collection(db, "uploadJobs"));
-    jobMap = new Map(); snap.docs.forEach(d => { const j = d.data(); if (j.status === "uploading") j.status = "pending"; jobMap.set(d.id, j); }); // 끊긴 uploading은 대기로
-    let open = 0;
-    [...jobMap.entries()].sort((a, b) => String(a[1].relPath || "").localeCompare(String(b[1].relPath || "")) || String(a[1].filename).localeCompare(String(b[1].filename)))
-      .forEach(([id, j]) => {
-        if (!isDone(j) && !itemById.has(id)) { const it = itemFromJob(id, j); queueItems.push(it); itemById.set(id, it); open++; }
-      });
-    rebuildHashIndex();
-    diag(`Firebase 업로드 작업 ${jobMap.size}개 로드 (미완료 ${open}개 복원)`);
-    renderFileList();
-  } catch (e) { diag("Firebase 업로드 작업 로드 실패: " + e.message, true); }
+  jobMap = new Map();
+  queueItems = [];
+  itemById = new Map();
+  diag("업로드 작업은 브라우저 메모리에서만 관리합니다");
+  renderFileList();
 }
 
 // ----- 파일 추가 -----
 async function addFiles(entries) {
-  await jobsReady;
   const vids = entries.filter(e => (e.file.type || "").startsWith("video/") || VIDEO_RE.test(e.file.name));
-  const toCreate = [];
   let attached = 0, fresh = 0, known = 0;
+
   for (const e of vids) {
     const jobId = await jobIdFor(e.file, e.relPath || "");
     let it = itemById.get(jobId);
+
     if (it) {
-      if (!it.file && !isDone(it)) { it.file = e.file; it.handle = e.handle || null; attached++; } else known++;
+      if (!it.file && !isDone(it)) {
+        it.file = e.file;
+        it.handle = e.handle || null;
+        attached++;
+      } else {
+        known++;
+      }
       continue;
     }
-    const j = jobMap.get(jobId);
-    if (j) {
-      it = itemFromJob(jobId, j);
-      if (!isDone(it)) { it.file = e.file; it.handle = e.handle || null; }
-      known++;
-    } else {
-      it = { jobId, name: e.file.name, size: e.file.size, lastModified: e.file.lastModified, relPath: e.relPath || "",
-        file: e.file, handle: e.handle || null, status: "pending", error: null, hash: null, duplicate: false,
-        publicId: null, url: null, thumb: null, resourceType: null, keywords: [] };
-      toCreate.push(it); fresh++;
-    }
-    queueItems.push(it); itemById.set(jobId, it);
+
+    it = {
+      jobId,
+      name: e.file.name,
+      size: e.file.size,
+      lastModified: e.file.lastModified,
+      relPath: e.relPath || "",
+      file: e.file,
+      handle: e.handle || null,
+      status: "pending",
+      error: null,
+      hash: null,
+      duplicate: false,
+      publicId: null,
+      url: null,
+      thumb: null,
+      resourceType: null,
+      keywords: []
+    };
+    queueItems.push(it);
+    itemById.set(jobId, it);
+    fresh++;
   }
+
   renderFileList();
-  const skippedDone = vids.length - fresh - attached;
-  if (skippedDone > 0) toast(`${skippedDone}개는 이미 목록에 있는 동일 파일(경로·이름·크기·수정시간 동일)이라 이어받기 기록을 유지했습니다`);
-  if (toCreate.length) {
-    for (let i = 0; i < toCreate.length; i += 400) {
-      const chunk = toCreate.slice(i, i + 400);
-      chunk.forEach(noteJob);
-      try {
-        const batch = writeBatch(db);
-        chunk.forEach(it => batch.set(doc(db, "uploadJobs", it.jobId), { ...jobPatch(it), createdAt: serverTimestamp() }));
-        await batch.commit();
-      } catch (err) { persistErrors++; diag("Firebase 작업 생성 실패: " + err.message, true); }
-    }
+
+  if (known > 0) toast(`${known}개는 현재 업로드 대기열에 이미 있습니다`);
+  if (vids.length - fresh - attached - known > 0) {
+    toast(`영상 파일이 아닌 ${vids.length - fresh - attached - known}개는 제외했습니다`);
   }
+
   saveHandles(vids.map(e => e.handle ? e : null).filter(Boolean));
-  diag(`파일 ${vids.length}개 추가 (신규 ${fresh}, 기존 작업 ${known}, 파일 재연결 ${attached}, 영상 아님 제외 ${entries.length - vids.length})`);
-  // 파일 선택 즉시 업로드
+  diag(`파일 ${vids.length}개 추가 (신규 ${fresh}, 기존 대기열 ${known}, 파일 재연결 ${attached}, 영상 아님 제외 ${entries.length - vids.length})`);
+
+  // 파일 선택 즉시 업로드. Firestore에 대기 상태를 기록하지 않는다.
   if (queueItems.some(i => i.status === "pending" && i.file)) {
     runState = "running";
     startWorkers();
@@ -1340,19 +1339,7 @@ $("stopAllBtn").onclick = async () => {
   queueItems = queueItems.filter(i => !ids.includes(i.jobId));
   ids.forEach(id => jobMap.delete(id));
 
-  // Firestore의 uploadJobs에서도 실제로 삭제한다.
-  for (let i = 0; i < ids.length; i += 400) {
-    try {
-      const batch = writeBatch(db);
-      ids.slice(i, i + 400).forEach(id => {
-        batch.delete(doc(db, "uploadJobs", id));
-      });
-      await batch.commit();
-    } catch (e) {
-      persistErrors++;
-      diag(`전체 업로드 취소 후 작업 기록 삭제 실패: ${e.message}`, true);
-    }
-  }
+  // 업로드 작업 상태는 메모리에만 있으므로 Firestore 삭제 작업도 하지 않는다.
 
   activeUploadControllers.clear();
   activeWorkers = 0;
@@ -1448,7 +1435,7 @@ $("kwApplyBtn").onclick = async () => {
 // 화면 이벤트는 위에서 모두 연결한 뒤, 데이터 로딩은 각각 실패를 흡수한다.
 // 한 컬렉션(Firebase 작업 목록 등)이 실패해도 검색/선택/모달 같은 UI가 죽지 않는다.
 firebaseReady.then(() => {
-  jobsReady = loadJobs().catch(e => { reportFirebaseError("업로드 작업 로드 실패", e); });
+  // uploadJobs는 더 이상 로드하지 않는다. 업로드 큐는 현재 브라우저 세션에서만 유지한다.
   const videosReady = loadVideos()
     .catch(e => {
       reportFirebaseError("영상 목록 로드 실패", e);

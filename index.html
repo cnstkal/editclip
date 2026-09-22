@@ -313,7 +313,7 @@
 </div>
 
 <script type="module">
-let initializeApp, getFirestore, collection, getDocs, addDoc, updateDoc, setDoc, deleteDoc, doc;
+let initializeApp, getFirestore, initializeFirestore, persistentLocalCache, collection, getDocs, addDoc, updateDoc, setDoc, deleteDoc, doc;
 let serverTimestamp, query, orderBy, writeBatch;
 let db = null;
 
@@ -332,10 +332,11 @@ const firebaseReady = Promise.all([
   import("https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js")
 ]).then(([appMod, fsMod]) => {
   ({ initializeApp } = appMod);
-  ({ getFirestore, collection, getDocs, addDoc, updateDoc, setDoc, deleteDoc, doc,
+  ({ getFirestore, initializeFirestore, persistentLocalCache, collection, getDocs, addDoc, updateDoc, setDoc, deleteDoc, doc,
      serverTimestamp, query, orderBy, writeBatch } = fsMod);
   const fbApp = initializeApp(firebaseConfig);
-  db = getFirestore(fbApp);
+  try { db = initializeFirestore(fbApp, { localCache: persistentLocalCache() }); }
+  catch (_) { db = getFirestore(fbApp); }
 }).catch(e => {
   reportFirebaseError("Firebase 연결 실패", e);
 });
@@ -824,6 +825,7 @@ function jobPatch(it) {
 }
 function noteJob(it) {
   jobMap.set(it.jobId, { ...jobPatch(it) });
+  saveQueueSnapshot();
 }
 // 업로드 상태는 Firestore에 저장하지 않는다. 페이지를 닫으면 현재 업로드 큐는 사라진다.
 async function persist(it) {
@@ -902,6 +904,7 @@ async function addFiles(entries) {
     fresh++;
   }
 
+  saveQueueSnapshot();
   renderFileList();
 
   if (known > 0) toast(`${known}개는 현재 업로드 대기열에 이미 있습니다`);
@@ -939,6 +942,31 @@ async function idbPut(pairs) {
 async function idbGet(key) {
   const d = await idb();
   return await new Promise((res, rej) => { const r = d.transaction("h").objectStore("h").get(key); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+}
+const QUEUE_KEY = "editclip_upload_queue_v2";
+function saveQueueSnapshot() {
+  try {
+    const data = queueItems.filter(i => !isDone(i)).map(i => ({
+      jobId:i.jobId,name:i.name,size:i.size,lastModified:i.lastModified,relPath:i.relPath||"",
+      status:i.status==="uploading"?"pending":i.status,error:i.error||null,hash:i.hash||null,
+      duplicate:!!i.duplicate,duplicateOf:i.duplicateOf||null,publicId:i.publicId||null,url:i.url||null,
+      thumb:i.thumb||null,resourceType:i.resourceType||null,version:i.version||null,keywords:i.keywords||[]
+    }));
+    localStorage.setItem(QUEUE_KEY, JSON.stringify(data));
+  } catch (_) {}
+}
+function loadQueueSnapshot() {
+  try {
+    const data = JSON.parse(localStorage.getItem(QUEUE_KEY) || "[]");
+    if (!Array.isArray(data) || !data.length) return;
+    queueItems = data.map(x => ({...x,file:null,handle:null,status:isDone(x)?x.status:"pending"}));
+    itemById = new Map(queueItems.map(i => [i.jobId,i]));
+    renderFileList();
+    if (queueItems.some(i => !isDone(i))) {
+      $("reconnectBtn").style.display = "block";
+      diag("이전 업로드 작업이 복구되었습니다. [이전에 선택한 파일 다시 연결]을 눌러 계속할 수 있습니다.");
+    }
+  } catch (_) {}
 }
 async function saveHandles(entries) {
   if (!hasFSA || !entries.length) return;
@@ -1490,6 +1518,7 @@ $("kwApplyBtn").onclick = async () => {
 // 화면 이벤트는 위에서 모두 연결한 뒤, 데이터 로딩은 각각 실패를 흡수한다.
 // 한 컬렉션(Firebase 작업 목록 등)이 실패해도 검색/선택/모달 같은 UI가 죽지 않는다.
 applyUploadMode();
+loadQueueSnapshot();
 firebaseReady.then(() => {
   // uploadJobs는 더 이상 로드하지 않는다. 업로드 큐는 현재 브라우저 세션에서만 유지한다.
   const videosReady = loadVideos()

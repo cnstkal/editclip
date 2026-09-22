@@ -379,6 +379,63 @@ let noKwOnly = false;
 
 const $ = (id) => document.getElementById(id);
 
+const VIEW_STATE_KEY = "editclip_view_state_v1";
+let initialViewRestored = false;
+let viewSaveTimer = null;
+let savedViewState = null;
+
+try {
+  savedViewState = JSON.parse(localStorage.getItem(VIEW_STATE_KEY) || "null");
+} catch (_) {
+  savedViewState = null;
+}
+
+if ("scrollRestoration" in history) history.scrollRestoration = "manual";
+
+function saveViewState() {
+  try {
+    localStorage.setItem(VIEW_STATE_KEY, JSON.stringify({
+      scrollY: Math.max(0, Math.round(window.scrollY || 0)),
+      search: $("searchInput")?.value || "",
+      favOnly: !!favOnly,
+      noKwOnly: !!noKwOnly,
+      sortMode: sortMode || "default"
+    }));
+  } catch (_) {}
+}
+
+function scheduleSaveViewState() {
+  clearTimeout(viewSaveTimer);
+  viewSaveTimer = setTimeout(saveViewState, 100);
+}
+
+function restoreViewStateInputs() {
+  if (!savedViewState) return;
+  $("searchInput").value = savedViewState.search || "";
+  favOnly = !!savedViewState.favOnly;
+  noKwOnly = !!savedViewState.noKwOnly;
+  if (savedViewState.sortMode === "similar" || savedViewState.sortMode === "default") {
+    sortMode = savedViewState.sortMode;
+    $("sortMode").value = sortMode;
+  }
+  $("favFilterBtn").textContent = favOnly ? "★" : "☆";
+  $("noKwBtn").classList.toggle("on", noKwOnly);
+  $("noKwBtn").setAttribute("aria-pressed", noKwOnly);
+  $("noKwBtn").textContent = noKwOnly ? "✓ 검색어 없는 것만" : "검색어 없는 것만";
+}
+
+function restoreViewScroll() {
+  if (initialViewRestored) return;
+  initialViewRestored = true;
+  const y = Number(savedViewState?.scrollY);
+  if (!Number.isFinite(y) || y <= 0) return;
+  requestAnimationFrame(() => {
+    window.scrollTo(0, y);
+    requestAnimationFrame(() => window.scrollTo(0, y));
+  });
+}
+
+
 function thumbUrl(publicId, ver) {
   if (!publicId) return "";
   const safePublicId = String(publicId).split("/").map(encodeURIComponent).join("/");
@@ -587,7 +644,7 @@ function appendGridPage() {
   gridAppendBusy = false;
 }
 
-let sortMode = "default";
+let sortMode = savedViewState?.sortMode === "similar" ? "similar" : "default";
 let similarityBusy = false;
 let similarityGeneration = 0;
 const similarityCache = new Map();
@@ -749,6 +806,7 @@ async function render() {
   const grid = $("grid");
   grid.replaceChildren();
   appendGridPage();
+  restoreViewScroll();
 
   const empty = $("emptyMsg");
   empty.textContent = (noKwOnly && !list.length) ? "검색어가 없는 영상이 없습니다" : "결과가 없습니다";
@@ -850,25 +908,30 @@ function maybeAppendGrid() {
   }
 }
 window.addEventListener("scroll", maybeAppendGrid, { passive: true });
+window.addEventListener("scroll", scheduleSaveViewState, { passive: true });
 
 $("sortMode").onchange = () => {
   sortMode = $("sortMode").value;
+  scheduleSaveViewState();
   render();
 };
 let searchRenderTimer = null;
 $("searchInput").addEventListener("input", () => {
+  scheduleSaveViewState();
   clearTimeout(searchRenderTimer);
   searchRenderTimer = setTimeout(render, 100);
 });
 
 $("favFilterBtn").onclick = () => {
   favOnly = !favOnly; pruneNext = true;
+  scheduleSaveViewState();
   $("favFilterBtn").textContent = favOnly ? "★" : "☆";
   $("favFilterBtn").classList.toggle("btn", favOnly);
   render();
 };
 $("noKwBtn").onclick = () => {
   noKwOnly = !noKwOnly; pruneNext = true;
+  scheduleSaveViewState();
   const b = $("noKwBtn");
   b.classList.toggle("on", noKwOnly);
   b.setAttribute("aria-pressed", noKwOnly);
@@ -1766,6 +1829,8 @@ $("kwApplyBtn").onclick = async () => {
 };
 
 // ---------- init ----------
+restoreViewStateInputs();
+window.addEventListener("beforeunload", saveViewState);
 // 화면 이벤트는 위에서 모두 연결한 뒤, 데이터 로딩은 각각 실패를 흡수한다.
 // 한 컬렉션(Firebase 작업 목록 등)이 실패해도 검색/선택/모달 같은 UI가 죽지 않는다.
 applyUploadMode();

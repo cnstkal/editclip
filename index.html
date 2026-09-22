@@ -736,7 +736,9 @@ const FULL_HASH_LIMIT = 50 * 1024 * 1024; // 이 크기 이하는 전체 SHA-256
 const UPLOAD_TIMEOUT_MS = 30 * 60 * 1000;
 const MAX_AUTO_RETRY = 2;
 const UPLOAD_MODE_KEY = "editclip_upload_mode";
-let uploadMode = localStorage.getItem(UPLOAD_MODE_KEY) || "optimized";           // 네트워크 오류/429/5xx 자동 재시도 횟수
+let uploadMode = localStorage.getItem(UPLOAD_MODE_KEY) || "optimized";
+let orderedBatchSeq = 0;
+let orderedBatch = null;           // 네트워크 오류/429/5xx 자동 재시도 횟수
 const CLD_ENDPOINT = `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/video/upload`;
 const VIDEO_RE = /\.(mp4|mov|avi|mkv|webm|m4v)$/i;
 const stat = (o) => o.status === "completed" && o.duplicate ? "duplicate" : o.status; // 구버전(completed+duplicate) 호환
@@ -1234,9 +1236,11 @@ async function processItem(item) {
 
 // ----- worker queue -----
 function pickNext() {
-  // 현재는 파일명 중복 확인을 사용하지 않으므로 pending + 실제 파일만 있으면 즉시 업로드한다.
+  // 순서대로 모드에서는 현재 배치(최대 10개) 안에서만 다음 파일을 집는다.
   for (const it of queueItems) {
-    if (it.status === "pending" && it.file) return it;
+    if (it.status !== "pending" || !it.file) continue;
+    if (uploadMode === "ordered" && it._orderedBatch !== orderedBatch) continue;
+    return it;
   }
   return null;
 }
@@ -1254,9 +1258,23 @@ async function worker() {
   finally {
     activeWorkers--;
     if (activeWorkers === 0) {
-      if (runState === "running") runState = "idle";
-      diag(runState === "idle" ? "대기 중인 업로드가 모두 처리되었습니다" : `큐 정지 (${runState})`);
-      render(); renderFileList();
+      if (runState === "running") {
+        if (uploadMode === "ordered") {
+          orderedBatch = null;
+          queueItems.forEach(it => {
+            if (it._orderedBatch != null) delete it._orderedBatch;
+          });
+          diag("다음 순서 배치 업로드 시작");
+          startWorkers();
+        } else {
+          runState = "idle";
+          diag("대기 중인 업로드가 모두 처리되었습니다");
+          render(); renderFileList();
+        }
+      } else {
+        diag(`큐 정지 (${runState})`);
+        render(); renderFileList();
+      }
     }
   }
 }
@@ -1271,9 +1289,29 @@ function applyUploadMode() {
   };
 }
 function startWorkers() {
-  const workerLimit = uploadMode === "ordered" ? 1 : CONCURRENCY;
+  if (runState !== "running") return;
+
+  let workerLimit = CONCURRENCY;
+
+  if (uploadMode === "ordered") {
+    // 현재 배치가 끝났을 때만 다음 10개를 배정한다.
+    if (activeWorkers === 0) {
+      const next = queueItems.filter(it => it.status === "pending" && it.file && it._orderedBatch == null).slice(0, CONCURRENCY);
+      if (!next.length) {
+        orderedBatch = null;
+        runState = "idle";
+        render();
+        renderFileList();
+        return;
+      }
+      orderedBatch = ++orderedBatchSeq;
+      next.forEach(it => { it._orderedBatch = orderedBatch; });
+    }
+    workerLimit = CONCURRENCY;
+  }
+
   while (activeWorkers < workerLimit && runState === "running" && pickNext()) {
-    activeWorkers++; worker();   // worker는 첫 await 전에 항목을 uploading으로 바꾼다
+    activeWorkers++; worker();
   }
   renderFileList();
 }

@@ -989,27 +989,30 @@ $("deleteBtn").onclick = async () => {
 };
 function getOriginalDownloadUrl(v) {
   if (!v?.cloudinaryUrl) return "";
-  const filename = String(v.filename || "video").replace(/[\\/]/g, "_");
-  const safeName = encodeURIComponent(filename);
   const raw = String(v.cloudinaryUrl);
   if (!raw.includes("/video/upload/")) return raw;
-  // fetch→Blob 방식은 iPhone Safari에서 cross-origin 영상이 확장자 없는
-  // 이상한 파일로 저장되거나 손상된 것처럼 보일 수 있다.
-  // Cloudinary의 fl_attachment는 영상 바이트 자체를 변환하지 않고
-  // 원본을 첨부파일로 내려받게 하며 지정한 원본 파일명을 사용한다.
-  if (raw.includes("/video/upload/fl_attachment")) return raw;
-  return raw.replace("/video/upload/", "/video/upload/fl_attachment:" + safeName + "/");
+
+  // iPhone Safari에서는 cross-origin <a download>이 무시될 수 있다.
+  // Cloudinary의 fl_attachment를 URL 자체에 넣어 Content-Disposition: attachment로
+  // 내려받게 한다. 파일명을 transformation에 직접 넣으면 한글/특수문자가 섞인
+  // 파일에서 Cloudinary가 오류 페이지를 반환하는 경우가 있어 파일명은 지정하지 않는다.
+  if (raw.includes("/video/upload/fl_attachment/")) return raw;
+  return raw.replace("/video/upload/", "/video/upload/fl_attachment/");
 }
+
 $("downloadBtn").onclick = () => {
   if (!currentDetail) return;
   const btn = $("downloadBtn");
   const url = getOriginalDownloadUrl(currentDetail);
   if (!url) return alert("원본 파일 주소가 없습니다.");
-  btn.disabled = true; btn.textContent = "다운로드 준비...";
+
+  btn.disabled = true;
+  btn.textContent = "다운로드 준비...";
   try {
+    // download 속성은 보조 수단으로만 사용하고, 실제 다운로드 여부는
+    // Cloudinary의 Content-Disposition 헤더에 맡긴다.
     const a = document.createElement("a");
     a.href = url;
-    a.download = currentDetail.filename || "video";
     a.rel = "noopener";
     document.body.appendChild(a);
     a.click();

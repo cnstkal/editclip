@@ -254,7 +254,6 @@
     <button class="close" id="uploadClose">✕</button>
     <h3>업로드 관리</h3>
     <div id="countBox"></div>
-    <div id="progressWrap"><div id="progressBar"></div></div>
     <div id="progressText" style="font-size:12px;color:#666;margin-top:6px;"></div>
     <div class="row">
       <input type="file" id="fileInput" multiple accept="video/*" style="display:none;">
@@ -1080,7 +1079,6 @@ function renderFileListNow() {
     return `<div class="fileRow"><div class="nm">${esc(ellipsize(j.filename || "(이름 없음)"))}${s === "failed" && j.error ? `<div class="er">${esc(j.error)}</div>` : ""}</div>` +
       (s === "failed" ? `<button class="btn secondary" data-retry="${id}" style="padding:2px 8px;font-size:11px;margin-right:6px">재시도</button>` : "") + `<span class="st ${cls}">${lb}</span></div>`;
   }).join("") + (rows.length > MAX_ROWS ? `<div class="fileRow"><span>… 외 ${rows.length - MAX_ROWS}개 (상태 칩을 눌러 필터링)</span></div>` : "");
-  $("progressBar").style.width = pct + "%";
   $("progressText").textContent = "";
   const needfile = queueItems.filter(it => (it.status === "pending" || it.status === "paused") && !it.file).length;
   $("retryFailBtn").style.display = c.failed ? "block" : "none";

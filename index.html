@@ -908,9 +908,11 @@ async function addFiles(entries) {
   }
   saveHandles(vids.map(e => e.handle ? e : null).filter(Boolean));
   diag(`파일 ${vids.length}개 추가 (신규 ${fresh}, 기존 작업 ${known}, 파일 재연결 ${attached}, 영상 아님 제외 ${entries.length - vids.length})`);
-  // 파일을 선택하는 즉시 업로드 시작
-  queueItems.forEach(i => { if (i.status === "pending" && i.file) i.checked = true; });
-  if (pickNext()) { runState = "running"; startWorkers(); }
+  // 파일 선택 즉시 업로드
+  if (queueItems.some(i => i.status === "pending" && i.file)) {
+    runState = "running";
+    startWorkers();
+  }
 }
 
 // ----- File System Access API + IndexedDB (지원 브라우저에서만; 실패하면 일반 선택창) -----
@@ -1230,7 +1232,10 @@ async function processItem(item) {
 
 // ----- worker queue -----
 function pickNext() {
-  for (const it of queueItems) if (it.status === "pending" && it.file && it.checked) return it; // checked = 파일명 중복 확인 완료
+  // 현재는 파일명 중복 확인을 사용하지 않으므로 pending + 실제 파일만 있으면 즉시 업로드한다.
+  for (const it of queueItems) {
+    if (it.status === "pending" && it.file) return it;
+  }
   return null;
 }
 async function worker() {

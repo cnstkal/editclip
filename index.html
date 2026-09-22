@@ -524,9 +524,10 @@ function appendGridPage() {
 
 let sortMode = "default";
 let similarityBusy = false;
+let similarityGeneration = 0;
 const similarityCache = new Map();
 
-function thumbSimilaritySignature(v) {
+function thumbSimilarityFeature(v) {
   return new Promise(resolve => {
     const url = getThumb(v);
     if (!url) return resolve(null);
@@ -534,17 +535,31 @@ function thumbSimilaritySignature(v) {
     img.crossOrigin = "anonymous";
     img.onload = () => {
       try {
-        const size = 16, canvas = document.createElement("canvas");
+        // 단순 흑백 해시 대신 4x4 영역별 평균 RGB를 사용한다.
+        // 같은 사람/장면처럼 색감과 구도가 비슷한 썸네일이 더 잘 붙도록 한다.
+        const size = 32, cells = 4;
+        const canvas = document.createElement("canvas");
         canvas.width = size; canvas.height = size;
         const ctx = canvas.getContext("2d", { willReadFrequently: true });
         ctx.drawImage(img, 0, 0, size, size);
         const d = ctx.getImageData(0, 0, size, size).data;
-        const gray = [];
-        for (let i = 0; i < d.length; i += 4) gray.push((d[i] * 299 + d[i+1] * 587 + d[i+2] * 114) / 1000);
-        const avg = gray.reduce((a,b)=>a+b,0) / gray.length;
-        let bits = "";
-        gray.forEach(x => bits += x >= avg ? "1" : "0");
-        resolve(bits);
+        const out = [];
+        const cell = size / cells;
+        for (let cy = 0; cy < cells; cy++) {
+          for (let cx = 0; cx < cells; cx++) {
+            let rr = 0, gg = 0, bb = 0, n = 0;
+            const x0 = cx * cell, x1 = (cx + 1) * cell;
+            const y0 = cy * cell, y1 = (cy + 1) * cell;
+            for (let y = y0; y < y1; y++) {
+              for (let x = x0; x < x1; x++) {
+                const p = (y * size + x) * 4;
+                rr += d[p]; gg += d[p + 1]; bb += d[p + 2]; n++;
+              }
+            }
+            out.push(rr / n / 255, gg / n / 255, bb / n / 255);
+          }
+        }
+        resolve(out);
       } catch (_) { resolve(null); }
     };
     img.onerror = () => resolve(null);
@@ -552,52 +567,108 @@ function thumbSimilaritySignature(v) {
   });
 }
 
-function sigDistance(a, b) {
+function featureDistance(a, b) {
   if (!a || !b) return 999;
-  let n = 0;
-  for (let i = 0; i < Math.min(a.length,b.length); i++) if (a[i] !== b[i]) n++;
-  return n;
+  let sum = 0;
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    const d = a[i] - b[i];
+    sum += d * d;
+  }
+  return Math.sqrt(sum);
 }
 
-async function sortByVisualSimilarity(list) {
+function featureMean(items) {
+  const valid = items.filter(Boolean);
+  if (!valid.length) return null;
+  const out = new Array(valid[0].length).fill(0);
+  valid.forEach(f => f.forEach((x, i) => out[i] += x));
+  return out.map(x => x / valid.length);
+}
+
+async function sortByVisualSimilarity(list, generation) {
   if (list.length < 2) return list;
+
   const pending = list.filter(v => !similarityCache.has(v.id));
-  let done = 0;
-  for (let i = 0; i < pending.length; i += 8) {
-    const chunk = pending.slice(i, i + 8);
-    const sigs = await Promise.all(chunk.map(async v => [v.id, await thumbSimilaritySignature(v)]));
-    sigs.forEach(([id,s]) => similarityCache.set(id,s));
-    done += chunk.length;
-    if (done % 80 === 0) diag(`썸네일 분석 중… ${done}/${pending.length}`);
+  for (let i = 0; i < pending.length; i += 12) {
+    if (generation !== similarityGeneration) return null;
+    const chunk = pending.slice(i, i + 12);
+    const sigs = await Promise.all(chunk.map(async v => [v.id, await thumbSimilarityFeature(v)]));
+    sigs.forEach(([id, f]) => similarityCache.set(id, f));
+    if ((i + chunk.length) % 60 === 0 || i + chunk.length === pending.length) {
+      diag(`썸네일 분석 중… ${Math.min(i + chunk.length, pending.length)}/${pending.length}`);
+    }
     await new Promise(r => setTimeout(r, 0));
   }
-  const remaining = list.slice();
-  const result = [];
-  let current = remaining.shift();
-  result.push(current);
-  while (remaining.length) {
-    const cs = similarityCache.get(current.id);
-    let best = 0, bestD = Infinity;
-    for (let i = 0; i < remaining.length; i++) {
-      const d = sigDistance(cs, similarityCache.get(remaining[i].id));
-      if (d < bestD) { bestD = d; best = i; }
+
+  // 12개 정도의 시각적 그룹을 먼저 만든 뒤 각 그룹 안에서 가까운 썸네일을 이어 붙인다.
+  // 기존 O(n²) 전체 순차 탐색보다 5천개 규모에서 훨씬 가볍다.
+  const valid = list.filter(v => similarityCache.get(v.id));
+  const invalid = list.filter(v => !similarityCache.get(v.id));
+  if (!valid.length) return list;
+
+  const K = Math.min(12, Math.max(2, Math.ceil(Math.sqrt(valid.length / 80))));
+  const seeds = [];
+  for (let i = 0; i < K; i++) seeds.push(similarityCache.get(valid[Math.floor(i * valid.length / K)].id));
+
+  const groups = Array.from({length: K}, () => []);
+  for (let round = 0; round < 4; round++) {
+    groups.forEach(g => g.length = 0);
+    valid.forEach(v => {
+      const f = similarityCache.get(v.id);
+      let best = 0, bd = Infinity;
+      for (let k = 0; k < seeds.length; k++) {
+        const d = featureDistance(f, seeds[k]);
+        if (d < bd) { bd = d; best = k; }
+      }
+      groups[best].push(v);
+    });
+    for (let k = 0; k < K; k++) {
+      if (groups[k].length) seeds[k] = featureMean(groups[k].map(v => similarityCache.get(v.id)));
     }
-    current = remaining.splice(best,1)[0];
-    result.push(current);
   }
-  return result;
+
+  const ordered = [];
+  // 그룹 자체도 색/구도 기준으로 가까운 그룹끼리 붙인다.
+  const groupOrder = Array.from({length: K}, (_, i) => i).sort((a,b) => {
+    const da = featureDistance(seeds[0], seeds[a]);
+    const db = featureDistance(seeds[0], seeds[b]);
+    return da - db;
+  });
+
+  for (const gi of groupOrder) {
+    const g = groups[gi];
+    if (!g.length) continue;
+    // 그룹 내부는 centroid와 가까운 순서 → 비슷한 썸네일이 연속으로 나오도록 한다.
+    g.sort((a,b) =>
+      featureDistance(similarityCache.get(a.id), seeds[gi]) -
+      featureDistance(similarityCache.get(b.id), seeds[gi])
+    );
+    ordered.push(...g);
+  }
+  ordered.push(...invalid);
+
+  return generation === similarityGeneration ? ordered : null;
 }
 
 async function render() {
+  const generation = ++similarityGeneration;
   const q = $("searchInput").value;
   let list = search(q);
   if (favOnly) list = list.filter(v => v.favorite);
   if (noKwOnly) list = list.filter(v => !hasKeywords(v));
-  if (sortMode === "similar" && !similarityBusy) {
+
+  if (sortMode === "similar") {
     similarityBusy = true;
-    try { list = await sortByVisualSimilarity(list); }
-    finally { similarityBusy = false; }
+    try {
+      const sorted = await sortByVisualSimilarity(list, generation);
+      if (generation !== similarityGeneration || !sorted) return;
+      list = sorted;
+    } finally {
+      if (generation === similarityGeneration) similarityBusy = false;
+    }
   }
+
+  if (generation !== similarityGeneration) return;
   visibleList = list;
   if (pruneNext) {
     pruneNext = false;
@@ -617,7 +688,9 @@ async function render() {
   const empty = $("emptyMsg");
   empty.textContent = (noKwOnly && !list.length) ? "검색어가 없는 영상이 없습니다" : "결과가 없습니다";
   empty.style.display = list.length ? "none" : "block";
-  $("filterInfo").textContent = noKwOnly ? `검색어 없는 영상 ${list.length.toLocaleString()}개` : "";
+  $("filterInfo").textContent = sortMode === "similar"
+    ? `시각적으로 비슷한 썸네일끼리 정렬 · ${list.length.toLocaleString()}개`
+    : (noKwOnly ? `검색어 없는 영상 ${list.length.toLocaleString()}개` : "");
 }
 
 // ----- 선택 (DOM 전체 재생성 없이 해당 카드만 갱신) -----

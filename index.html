@@ -265,7 +265,6 @@
     <div class="row">
       <textarea id="uploadKwInput" placeholder="검색어 (쉼표 또는 줄바꿈, 선택 사항)"></textarea>
     </div>
-    <button class="btn" id="startUploadBtn" style="width:100%;">업로드 시작</button>
     <div style="display:flex;gap:6px;margin-top:6px;">
       <button class="btn secondary" id="pauseBtn" style="flex:1;padding:10px 6px;">일시정지</button>
       <button class="btn secondary" id="resumeBtn" style="flex:1;padding:10px 6px;">재개</button>
@@ -909,6 +908,9 @@ async function addFiles(entries) {
   }
   saveHandles(vids.map(e => e.handle ? e : null).filter(Boolean));
   diag(`파일 ${vids.length}개 추가 (신규 ${fresh}, 기존 작업 ${known}, 파일 재연결 ${attached}, 영상 아님 제외 ${entries.length - vids.length})`);
+  // 파일을 선택하는 즉시 업로드 시작
+  queueItems.forEach(i => { if (i.status === "pending" && i.file) i.checked = true; });
+  if (pickNext()) { runState = "running"; startWorkers(); }
 }
 
 // ----- File System Access API + IndexedDB (지원 브라우저에서만; 실패하면 일반 선택창) -----
@@ -1299,25 +1301,18 @@ async function begin() {
   if (pickNext()) { runState = "running"; startWorkers(); }
 }
 
-$("startUploadBtn").onclick = () => {
-  diag("업로드 시작 버튼 클릭");
-  const ready = queueItems.filter(i => i.status === "pending" && i.file).length;
-  if (!ready) {
-    const paused = queueItems.filter(i => i.status === "paused" && i.file).length;
-    const need = queueItems.filter(i => !i.file && !isDone(i)).length;
-    return alert(paused ? "중지된 파일이 있습니다. [재개]를 눌러 주세요." : need ? "업로드할 파일이 브라우저에 없습니다. 파일을 다시 선택해 주세요." : "업로드할 파일이 없습니다");
-  }
-  begin();
-};
 $("pauseBtn").onclick = () => {
   if (runState !== "running") return;
   runState = "paused"; diag("일시정지: 진행 중인 요청이 끝나면 멈춥니다"); renderFileList();
 };
 $("resumeBtn").onclick = async () => {
   const paused = queueItems.filter(i => i.status === "paused");
-  paused.forEach(i => { i.status = "pending"; });
-  if (paused.length) await persistMany(paused);
-  diag("재개"); await begin();
+  if (!paused.length) return toast("재개할 업로드가 없습니다");
+  paused.forEach(i => { i.status = "pending"; i.error = null; i.checked = !!i.file; });
+  await persistMany(paused);
+  diag("재개");
+  runState = "running";
+  startWorkers();
 };
 $("stopAllBtn").onclick = async () => {
   // 이 버튼은 언제든 사용할 수 있으며, 완료된 영상만 남기고

@@ -1195,16 +1195,24 @@ async function processItem(item) {
     item.hash = item.hash || await computeFileHashGated(item.file);
     if (!item.hash && !processItem.warned) { processItem.warned = true; diag("이 환경은 crypto.subtle(HTTPS 필요)이 없어 fileHash를 기록하지 못합니다", true); }
 
-    if (item.hash && item.action !== "overwrite") {
+    if (item.hash && item.action !== "overwrite" && item.action !== "reupload") {
       const existing = hashIndex.get(item.hash);
       if (existing && existing.jobId !== item.jobId) {
-        item.duplicate = true;
-        item.dupKind = "content";
-        item.status = "duplicate";
-        item.error = null;
-        await persist(item);
-        diag(`중복 파일 건너뜀: ${item.name}`);
-        return;
+        const oldVideo = videos.find(v => v.id === existing.jobId);
+        const reupload = await askContentDuplicate(item, {
+          name: oldVideo?.filename || existing.publicId || "기존 영상"
+        });
+        if (!reupload) {
+          item.duplicate = true;
+          item.dupKind = "content";
+          item.status = "duplicate";
+          item.error = null;
+          await persist(item);
+          diag(`중복 파일 취소: ${item.name}`);
+          return;
+        }
+        item.action = "reupload";
+        diag(`중복 파일 재업로드: ${item.name}`);
       }
     }
 
@@ -1343,6 +1351,34 @@ function askDups(list) {
 }
 // 파일명/내용이 같아도 묻거나 건너뛰지 않고 모두 업로드한다. (askDups·덮어쓰기 코드는 사용하지 않지만 남겨둠)
 async function resolveDups() { return true; }
+let contentDupPromptQueue = Promise.resolve();
+
+function askContentDuplicate(item, existing) {
+  const run = () => new Promise(resolve => {
+    const ov = $("dupOverlay"), body = $("dupBody");
+    $("dupTitle").textContent = "동일한 내용의 중복 파일이 발견되었습니다";
+    body.innerHTML =
+      '<div style="font-size:13px;line-height:1.6;margin-bottom:12px;">' +
+      '<div><b>기존 영상</b><br>' + esc(existing.name || "(이름 없음)") + '</div>' +
+      '<div style="margin-top:8px;"><b>새 파일</b><br>' + esc((item.relPath || "") + item.name) + ' · ' + (item.size / 1048576).toFixed(1) + 'MB</div>' +
+      '<div style="margin-top:10px;color:#777;">파일 내용이 동일합니다. 다시 업로드할까요?</div></div>' +
+      '<div style="display:flex;gap:8px;">' +
+      '<button class="btn" data-content-dup="reupload" style="flex:1;">재업로드</button>' +
+      '<button class="btn secondary" data-content-dup="cancel" style="flex:1;">취소</button>' +
+      '</div>';
+    body.onclick = e => {
+      const b = e.target.closest("[data-content-dup]");
+      if (!b) return;
+      ov.classList.remove("show");
+      resolve(b.dataset.contentDup === "reupload");
+    };
+    ov.classList.add("show");
+  });
+  const next = contentDupPromptQueue.then(run, run);
+  contentDupPromptQueue = next.then(() => undefined, () => undefined);
+  return next;
+}
+
 let askBusy = false;
 async function begin() {
   if (askBusy) return;

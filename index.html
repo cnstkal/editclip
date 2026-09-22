@@ -318,6 +318,7 @@
 let initializeApp, getFirestore, initializeFirestore, persistentLocalCache, collection, getDocs, addDoc, updateDoc, setDoc, deleteDoc, doc;
 let serverTimestamp, query, orderBy, writeBatch;
 let db = null;
+let videosReady = Promise.resolve();
 
 const firebaseConfig = {
   apiKey: "AIzaSyC1asKoiZs1zHzKJSmY_yE7bPiMhzXLCdw",
@@ -440,6 +441,9 @@ function getThumbFallback(v) {
 }
 
 async function loadVideos() {
+  // 화면은 Firebase 응답을 기다리지 않고 먼저 표시하고,
+  // 데이터가 도착하면 아래에서 다시 렌더링한다. iPhone Safari에서
+  // Firestore getDocs()가 네트워크 상태에 따라 오래 대기해도 UI가 멈추지 않는다.
   // createdAt이 없는 예전 문서도 반드시 불러온다.
   // Firestore orderBy(createdAt)는 해당 필드가 없는 문서를 결과에서 제외할 수 있어
   // 기존 영상이 "전부 사라진 것처럼" 보이는 문제가 생길 수 있다.
@@ -1821,9 +1825,18 @@ if (savedViewState) {
 // 한 컬렉션(Firebase 작업 목록 등)이 실패해도 검색/선택/모달 같은 UI가 죽지 않는다.
 applyUploadMode();
 loadQueueSnapshot();
-firebaseReady.then(() => {
+
+// Firebase가 느리거나 일시적으로 연결되지 않아도 빈 화면으로 멈추지 않도록
+// 먼저 현재 메모리 상태(초기에는 빈 목록)를 즉시 그린다.
+render();
+
+// 업로드 재시도 등에서 사용할 준비 Promise도 전역으로 유지한다.
+// 이전에는 const videosReady가 firebaseReady.then() 내부에만 있어서
+// begin()에서 접근할 때 ReferenceError가 날 수 있었다.
+videosReady = firebaseReady.then(() => {
   // uploadJobs는 더 이상 로드하지 않는다. 업로드 큐는 현재 브라우저 세션에서만 유지한다.
-  const videosReady = loadVideos()
+  let settled = false;
+  const loadPromise = loadVideos()
     .catch(e => {
       reportFirebaseError("영상 목록 로드 실패", e);
       videos = [];
@@ -1831,8 +1844,18 @@ firebaseReady.then(() => {
       hashSet = new Set();
       render();
     })
-    .then(() => rebuildHashIndex());
+    .then(() => rebuildHashIndex())
+    .finally(() => { settled = true; });
+
+  // Firestore getDocs()가 무한 대기하더라도 앱 전체가 멈춘 것처럼 보이지 않게 한다.
+  setTimeout(() => {
+    if (!settled) {
+      reportFirebaseError("영상 목록 로드 지연", new Error("Firestore 응답을 기다리는 중입니다. 네트워크/Firestore 상태를 확인하세요."));
+    }
+  }, 10000);
+
   loadBundles().catch(e => reportFirebaseError("검색어 묶음 로드 실패", e));
+  return loadPromise;
 });
 </script>
 </body>

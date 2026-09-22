@@ -1027,7 +1027,7 @@ function renderFileListNow() {
   // 집계는 Firestore uploadJobs(jobMap) 기준 → 모달을 닫거나 새로고침해도 유지
   const c = { total: jobMap.size, completed: 0, uploading: 0, pending: 0, failed: 0, paused: 0, duplicate: 0 };
   const rows = [];
-  jobMap.forEach((j, id) => { const s = stat(j); if (s in c) c[s]++; if (!filterSt || filterSt === s) rows.push([id, j, s]); });
+  jobMap.forEach((j, id) => { const s = stat(j); if (s in c) c[s]++; if (!isDone(j) && (!filterSt || filterSt === s)) rows.push([id, j, s]); });
   const ord = { uploading: 0, failed: 1, pending: 2, paused: 2, completed: 3, duplicate: 3 };
   rows.sort((x, y) => ord[x[2]] - ord[y[2]]);
   const done = c.completed + c.duplicate, total = c.total, left = c.pending + c.paused;

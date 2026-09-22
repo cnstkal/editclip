@@ -671,12 +671,18 @@ DETAIL.forEach(([f, tags, input]) => {
     const b = e.target.closest("button"); if (!b) return;
     saveField(f, (currentDetail[f] || []).filter((_, i) => i !== +b.dataset.i));
   };
-  $(input + "Btn").onclick = () => {
+  const addValue = () => {
     const raw = f === "pairs" ? $(input).value.split(/[\n,]+/).map(x => x.trim()).filter(Boolean) : tokenize($(input).value);
     if (!raw.length) return;
     $(input).value = "";
     saveField(f, [...new Set([...(currentDetail[f] || []), ...raw])]);
   };
+  $(input + "Btn").onclick = addValue;
+  $(input).addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || e.isComposing) return;
+    e.preventDefault();
+    addValue();
+  });
 });
 $("favBtn").onclick = async () => { if (!currentDetail) return; await toggleFavorite(currentDetail); renderDetail(); };
 $("deleteBtn").onclick = async () => {
